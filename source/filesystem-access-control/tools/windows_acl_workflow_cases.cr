@@ -14,6 +14,7 @@ module WindowsACLWorkflows
     private class TrackedWriterProvider < WinACL::NativeWriterProvider
       getter setter_calls : Int32 = 0
       getter capture_calls : Int32 = 0
+      getter native_code : UInt32?
 
       def capture(handle : Void*) : WinACL::HandleSnapshot
         @capture_calls += 1
@@ -22,7 +23,7 @@ module WindowsACLWorkflows
 
       def replace(handle : Void*, acl : WinACL::ACL, information : UInt32) : UInt32
         @setter_calls += 1
-        super
+        @native_code = super
       end
     end
 
@@ -69,6 +70,7 @@ module WindowsACLWorkflows
         when "windows.writer-files"       then writer_files(root)
         when "windows.writer-propagation" then propagation_tree(root)
         when "windows.writer-partial"     then partial_propagation(root)
+        when "windows.writer-authority"   then propagation_authority(root)
         when "windows.access-check"       then access_check(root)
         when "windows.restricted-token"   then restricted_checks(root)
         when "windows.owner-rights"       then owner_rights(root)

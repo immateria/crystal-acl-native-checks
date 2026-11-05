@@ -3,7 +3,7 @@ require "file_utils"
 require "random/secure"
 require "../src/filesystem-access-control"
 require "../src/filesystem-access-control/write"
-require "./windows_acl_propagation_cases"
+require "./windows_acl_authority_cases"
 
 # Product API experiments. Each command runs one case in a disposable process;
 # the calling harness owns deadlines, crashes and completion validation.
@@ -40,6 +40,7 @@ module NativeACLRunner
     CaseDefinition.new("windows.writer-files", "windows", "Held-file DACL replacement records verification and handle identity", "Owned Windows local ACL-capable file fixture"),
     CaseDefinition.new("windows.writer-propagation", "windows", "Explicit directory propagation policy records existing and future children", "Owned Windows local ACL-capable directory fixture"),
     CaseDefinition.new("windows.writer-partial", "windows", "Sharing-conflict propagation records mixed descendants; failed setter retains independent samples", "Owned Windows local NTFS fixtures; exclusive directory enumeration handle"),
+    CaseDefinition.new("windows.writer-authority", "windows", "Denied fresh child WRITE_DAC authority and independently sampled parent propagation", "Owned NTFS fixtures; explicit owners and privilege-free thread impersonation"),
     CaseDefinition.new("windows.access-check", "windows", "Native access checks retain request and selected token context", "Disposable Windows process with queryable process token"),
     CaseDefinition.new("windows.restricted-token", "windows", "Restricted token observations and checks retain the selected context", "Disposable Windows process; restricted-token creation and impersonation allowed"),
     CaseDefinition.new("windows.owner-rights", "windows", "Explicit OWNER_RIGHTS entries control implicit owner security rights", "Disposable Windows process; owned NTFS file and privilege-free self-impersonation"),
@@ -169,6 +170,8 @@ module NativeACLRunner
       errors.concat(WindowsACLWorkflows.propagation_violations(facts))
     when "windows.writer-partial"
       errors.concat(WindowsACLWorkflows.partial_propagation_violations(facts))
+    when "windows.writer-authority"
+      errors.concat(WindowsACLWorkflows.propagation_authority_violations(facts))
     when "windows.access-check", "windows.restricted-token"
       errors << "Native workflow reported violations" unless facts["passed"].as_bool
     else
@@ -461,7 +464,7 @@ module NativeACLRunner
 
     private def self.run_windows(id : String, root : Path) : JSON::Any
       case id
-      when "windows.writer-files", "windows.writer-propagation", "windows.writer-partial", "windows.access-check", "windows.restricted-token", "windows.owner-rights"
+      when "windows.writer-files", "windows.writer-propagation", "windows.writer-partial", "windows.writer-authority", "windows.access-check", "windows.restricted-token", "windows.owner-rights"
         WindowsACLWorkflows.run(id)
       when "windows.capture-rights"
         path = root / "file"

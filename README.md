@@ -16,7 +16,7 @@ or cache. Official compiler ZIPs and the artifact-upload action are pinned.
 The official Windows compiler assets are labelled unsupported by Crystal.
 
 Every job stages its sources and builds under `RUNNER_TEMP`. It runs the
-selected specs, descriptor/token probes, and eight native behavior cases in
+selected specs, descriptor/token probes, and nine native behavior cases in
 fresh bounded helpers. Structured receipts are printed to job logs with the
 `ACL_RECEIPT` prefix. Each job also uploads a compressed evidence bundle with
 one-day retention and a 16 MiB limit before compression. A timeout, crash,
@@ -38,7 +38,7 @@ library never changes caller credentials; disposable probes do so explicitly.
 Results qualify those fixtures and the recorded host/toolchain, not all ACL
 semantics, token contexts, filesystems or remote servers.
 
-This snapshot builds on shard checkpoint `bbc583d`
+This snapshot builds on shard checkpoint `407f575`
 (filesystem-access-control), with additional propagation qualification cases
 identified by the source manifest. Hosted evidence belongs to the
 exact snapshot commit that ran. Sources are maintained in their own projects;
@@ -61,3 +61,10 @@ skipped. Descendants remain unverified in the public result. Downloaded export
 hashes, source hashes and all 32 completed observations were checked locally.
 The tested snapshot has a 119-entry manifest; later README-only revisions do
 not extend that native qualification to a new source revision.
+
+The next authority fixture deletes all observed token privileges, proves fresh
+child WRITE_DAC denial with explicit OWNER_RIGHTS ACEs, then samples the
+parent and children independently after one native setter call. Its result
+keeps successful propagation, skipped samples, failure with observed effects
+and failure without observed effects distinct. Native qualification is pending
+for this added case until a run at its exact source revision completes.

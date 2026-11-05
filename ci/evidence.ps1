@@ -85,7 +85,7 @@ function Export-AclEvidence {
                 foreach ($prefix in @('host-os', 'host-identity', 'compiler-version', 'compiler-stdlib', 'build', 'manifest',
                                       'windows.capture-rights', 'windows.token-context', 'windows.writer-files',
                                       'windows.writer-propagation', 'windows.access-check', 'windows.restricted-token',
-                                      'windows.owner-rights', 'windows.writer-partial')) {
+                                      'windows.owner-rights', 'windows.writer-partial', 'windows.writer-authority')) {
                     foreach ($extension in @('stdout', 'stderr')) {
                         $name = "$prefix.$extension"
                         if (Test-Path -LiteralPath (Join-Path $behavior $name)) { $candidates.Add('behavior/' + $name) }
