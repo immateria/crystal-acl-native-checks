@@ -13,20 +13,33 @@ require "../tools/native_acl_runner_support"
 require "../tools/native_acl_cases"
 
 private def writer_authority_facts
+  routes = [] of JSON::Any
+  [{"write-only", 0x40080_u32}, {"read-write", 0x60080_u32}].each do |profile, access|
+    [{"SetSecurityInfo", 4_u32}, {"SetSecurityInfo", 0x80000004_u32}, {"SetKernelObjectSecurity", 4_u32}].each do |operation, information|
+      # The first native run observed SetSecurityInfo error 5 through the
+      # write-only handle. Preserve that route outcome, not a promised success.
+      denied = profile == "write-only" && operation == "SetSecurityInfo"
+      routes << JSON.parse({profile: profile, requested_access: access, operation: operation,
+                            information: information, return_value: denied ? 5 : (operation == "SetSecurityInfo" ? 0 : 1),
+                            code: denied ? 5 : 0, origin: operation == "SetSecurityInfo" ? "ReturnValue" : nil,
+                            setter_calls: 1, readback_complete: true, identity_retained: true,
+                            owner_group_retained: true, dacl_changed: !denied, readback_matches: !denied,
+                            control_before: 0x9004_u16, control_after: 0x9004_u16,
+                            recovery_restored: true}.to_json)
+    end
+  end
   JSON.parse({passed: true, authority: {
     requested_access: 0x40080_u32,
     public_result: {execution: "NotAttempted", verification: "NotRun", stage: "PreCapture",
                     diagnostic: {operation: "GetSecurityInfo", code: 5, origin: "ReturnValue"}},
-    public_setter_calls: 0, before_unchanged: true,
-    raw_setter_code: 0, raw_setter_calls: 1, raw_dacl_changed: true,
-    raw_readback_matches: true, identity_retained: true,
+    public_setter_calls: 0, before_unchanged: true, routes: routes,
     limited_readback_complete: false,
     limited_readback_diagnostic: {operation: "GetSecurityInfo", code: 5, origin: "ReturnValue"},
   }}.to_json)
 end
 
 describe "Native ACL writer authority evidence" do
-  it "requires the complementary write-only authority control" do
+  it "requires the complementary write-only authority controls" do
     NativeACLRunner.violations("windows.writer-files", JSON.parse(%({"passed":true}))).should_not be_empty
     NativeACLRunner.violations("windows.writer-files", writer_authority_facts).should be_empty
   end
@@ -38,19 +51,51 @@ describe "Native ACL writer authority evidence" do
     facts = writer_authority_facts
     facts["authority"]["public_result"].as_h["stage"] = JSON::Any.new("Precondition")
     NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    facts["authority"].as_h["before_unchanged"] = JSON::Any.new(false)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
   end
 
-  it "requires an actual successful native edit and independent matching readback" do
-    ["raw_setter_code", "raw_setter_calls"].each do |field|
+  it "requires six distinct route and handle controls" do
+    facts = writer_authority_facts
+    facts["authority"]["routes"].as_a.pop
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    rows = facts["authority"]["routes"].as_a
+    rows[1] = rows[0]
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    facts["authority"]["routes"][0].as_h["requested_access"] = JSON::Any.new(0x60080_i64)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+  end
+
+  it "requires one successful setter and independent readback for the readable positive controls" do
+    %w(setter_calls code).each do |field|
       facts = writer_authority_facts
-      facts["authority"].as_h[field] = JSON::Any.new(2_i64)
+      facts["authority"]["routes"][3].as_h[field] = JSON::Any.new(2_i64)
       NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
     end
-    ["before_unchanged", "raw_dacl_changed", "raw_readback_matches", "identity_retained"].each do |field|
+    %w(readback_complete identity_retained owner_group_retained dacl_changed readback_matches recovery_restored).each do |field|
       facts = writer_authority_facts
-      facts["authority"].as_h[field] = JSON::Any.new(false)
+      facts["authority"]["routes"][3].as_h[field] = JSON::Any.new(false)
       NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
     end
+  end
+
+  it "preserves native route outcomes without treating failure as proof of no effects" do
+    facts = writer_authority_facts
+    row = facts["authority"]["routes"][0]
+    row.as_h["dacl_changed"] = JSON::Any.new(true)
+    row.as_h["readback_matches"] = JSON::Any.new(true)
+    NativeACLRunner.violations("windows.writer-files", facts).should be_empty
+    row.as_h["origin"] = JSON::Any.new("LastError")
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    facts["authority"]["routes"][2].as_h["return_value"] = JSON::Any.new(0_i64)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    facts["authority"]["routes"][0].as_h["code"] = JSON::Any.new(13_i64)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
   end
 
   it "keeps unsupported verification and native error provenance explicit" do

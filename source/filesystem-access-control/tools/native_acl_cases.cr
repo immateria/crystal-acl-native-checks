@@ -153,20 +153,17 @@ module NativeACLRunner
       errors << "Wrong write-only handle profile" unless authority["requested_access"].as_i64 == 0x40080
       result = authority["public_result"]
       errors << "Unreadable handle reached mutation" unless result["execution"].as_s == "NotAttempted" &&
-                                                           result["verification"].as_s == "NotRun" &&
-                                                           result["stage"].as_s == "PreCapture" &&
-                                                           authority["public_setter_calls"].as_i64 == 0
+                                                            result["verification"].as_s == "NotRun" &&
+                                                            result["stage"].as_s == "PreCapture" &&
+                                                            authority["public_setter_calls"].as_i64 == 0
       [result["diagnostic"], authority["limited_readback_diagnostic"]].each do |diagnostic|
         errors << "Missing READ_CONTROL failure provenance" unless diagnostic["operation"].as_s == "GetSecurityInfo" &&
-                                                                  diagnostic["code"].as_i64 == 5 &&
-                                                                  diagnostic["origin"].as_s == "ReturnValue"
+                                                                   diagnostic["code"].as_i64 == 5 &&
+                                                                   diagnostic["origin"].as_s == "ReturnValue"
       end
-      errors << "Setter-only control did not execute once successfully" unless authority["raw_setter_code"].as_i64 == 0 &&
-                                                                              authority["raw_setter_calls"].as_i64 == 1
-      %w(before_unchanged raw_dacl_changed raw_readback_matches identity_retained).each do |field|
-        errors << "Missing authority evidence: #{field}" unless authority[field].as_bool
-      end
+      errors << "Public pre-capture refusal changed security" unless authority["before_unchanged"].as_bool
       errors << "Write-only handle unexpectedly supplied complete readback" if authority["limited_readback_complete"].as_bool
+      errors.concat(writer_route_violations(authority["routes"]))
     when "windows.writer-propagation", "windows.access-check", "windows.restricted-token"
       errors << "Native workflow reported violations" unless facts["passed"].as_bool
     else
@@ -175,6 +172,50 @@ module NativeACLRunner
     errors
   rescue error : KeyError | IndexError | TypeCastError
     ["Malformed or incomplete observation: #{error.message}"]
+  end
+
+  private def self.writer_route_violations(value : JSON::Any) : Array(String)
+    errors = [] of String
+    rows = value.as_a
+    errors << "Missing setter route/handle controls" unless rows.size == 6
+    expected = Set(Tuple(String, String, Int64)).new
+    %w(write-only read-write).each do |profile|
+      expected << {profile, "SetSecurityInfo", 4_i64}
+      expected << {profile, "SetSecurityInfo", 0x80000004_i64}
+      expected << {profile, "SetKernelObjectSecurity", 4_i64}
+    end
+    seen = Set(Tuple(String, String, Int64)).new
+    rows.each do |row|
+      profile, operation, information = row["profile"].as_s, row["operation"].as_s, row["information"].as_i64
+      key = {profile, operation, information}
+      unless expected.includes?(key) && seen.add?(key)
+        errors << "Unexpected or duplicate setter route #{key}"
+        next
+      end
+      access = profile == "write-only" ? 0x40080_i64 : 0x60080_i64
+      errors << "Wrong setter handle rights for #{key}" unless row["requested_access"].as_i64 == access
+      errors << "Setter did not execute exactly once for #{key}" unless row["setter_calls"].as_i64 == 1
+      %w(readback_complete identity_retained owner_group_retained recovery_restored).each do |field|
+        errors << "Missing setter witness #{field} for #{key}" unless row[field].as_bool
+      end
+      before, after = row["control_before"].as_i64, row["control_after"].as_i64
+      errors << "Invalid control evidence for #{key}" unless before.in?(0..0xffff) && after.in?(0..0xffff) && before & 0x1000 != 0
+      code, returned = row["code"].as_i64, row["return_value"].as_i64
+      errors << "Unexpected setter error for #{key}" unless code.in?({0_i64, 5_i64})
+      errors << "Readable positive setter control failed for #{key}" if profile == "read-write" && code != 0
+      if operation == "SetSecurityInfo"
+        errors << "SetSecurityInfo return provenance changed for #{key}" unless returned == code && row["origin"].as_s == "ReturnValue"
+      else
+        valid = code == 0 ? returned != 0 && row["origin"].raw.nil? : returned == 0 && row["origin"].as_s == "LastError"
+        errors << "SetKernelObjectSecurity return provenance changed for #{key}" unless valid
+      end
+      changed, matches = row["dacl_changed"].as_bool, row["readback_matches"].as_bool
+      errors << "Successful setter lacks changed matching readback for #{key}" if code == 0 && !(changed && matches)
+      # A reported failure retains its independent readback, even when it
+      # reveals effects. Neither failure nor a matched experiment proves rollback.
+    end
+    errors << "Missing distinct setter routes" unless seen == expected
+    errors
   end
 
   private def self.same_identity?(left : JSON::Any, right : JSON::Any) : Bool

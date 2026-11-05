@@ -27,6 +27,24 @@ module WindowsACLWorkflows
         attributes : UInt32
       end
 
+      # Absolute SECURITY_DESCRIPTOR: the pointer fields give the structure
+      # native alignment. The Win32 helpers, not field stores, initialize it.
+      struct SecurityDescriptor
+        revision : UInt8
+        sbz1 : UInt8
+        control : UInt16
+        owner : Void*
+        group : Void*
+        sacl : Void*
+        dacl : Void*
+      end
+
+      fun initialize_descriptor = InitializeSecurityDescriptor(descriptor : Void*, revision : UInt32) : Int32
+      fun descriptor_dacl = SetSecurityDescriptorDacl(descriptor : Void*, present : Int32, dacl : Void*, defaulted : Int32) : Int32
+      fun descriptor_control = SetSecurityDescriptorControl(descriptor : Void*, interested : UInt16, value : UInt16) : Int32
+      fun valid_descriptor = IsValidSecurityDescriptor(descriptor : Void*) : Int32
+      fun kernel_security = SetKernelObjectSecurity(handle : Void*, information : UInt32, descriptor : Void*) : Int32
+
       fun duplicate_token = DuplicateToken(token : Void*, level : Int32, duplicate : Void**) : Int32
       fun restricted_token = CreateRestrictedToken(token : Void*, flags : UInt32,
                                                    disabled_count : UInt32, disabled : SIDAndAttributes*,
@@ -181,7 +199,7 @@ module WindowsACLWorkflows
     end
 
     private def self.writer_authority(path : Path, held : Void*, recovery : WinACL::ACL,
-                                     principal : WinACL::SID) : JSON::Any
+                                      principal : WinACL::SID) : JSON::Any
       target = WinACL::HandleReader.capture(held)
       ensure!(target.complete?, "Authority control target capture failed")
       desired = acl([{0_u8, 0_u8, 0x120089_u32, principal}])
@@ -200,31 +218,109 @@ module WindowsACLWorkflows
         unchanged = same_security?(target, WinACL::HandleReader.capture(held))
         ensure!(unchanged, "Pre-capture refusal changed target security")
 
-        # The same handle has native mutation authority. Use an independent,
-        # already-held readable handle to witness a real change and its identity.
-        code = provider.replace(write_only, desired, 0x80000004_u32)
-        ensure!(code == 0 && provider.setter_calls == 1, "WRITE_DAC native control failed: #{code}")
-        after = WinACL::HandleReader.capture(held)
-        ensure!(after.complete?, "Independent authority readback failed")
-        changed = after.security.dacl.try(&.bytes) != target.security.dacl.try(&.bytes)
-        matches = after.security.dacl.try(&.bytes) == desired.bytes
-        identity_retained = after.identity == target.identity
-        ensure!(changed && matches && identity_retained, "Native authority control did not change the held target as requested")
         limited = WinACL::HandleReader.capture(write_only)
         limited_diagnostic = limited.security.diagnostic || limited.diagnostic
         ensure!(!limited.complete? && limited_diagnostic.try(&.operation) == "GetSecurityInfo" &&
                 limited_diagnostic.try(&.code) == 5 && limited_diagnostic.try(&.origin.return_value?) == true,
           "Write-only readback did not retain READ_CONTROL failure")
+        routes = [] of JSON::Any
+        # Both mutation handles are acquired before the route experiments. The
+        # original readable handle independently captures and restores each row.
+        with_handle(path, 0x60080_u32) do |read_write|
+          { {"write-only", write_only}, {"read-write", read_write} }.each do |profile, handle|
+            { {"SetSecurityInfo", 4_u32}, {"SetSecurityInfo", 0x80000004_u32},
+             {"SetKernelObjectSecurity", 4_u32} }.each do |operation, information|
+              prepare(held, recovery)
+              before = WinACL::HandleReader.capture(held)
+              ensure!(before.complete? && before.security.dacl == recovery &&
+                      before.security.dacl_inheritance_control.try(&.protected?) == true,
+                "Authority route recovery baseline is incomplete or differs")
+
+              returned, code, origin = if operation == "SetSecurityInfo"
+                                         route_provider = TrackedWriterProvider.new
+                                         value = route_provider.replace(handle, desired, information)
+                                         ensure!(route_provider.setter_calls == 1, "Authority route setter count differs")
+                                         {value, value, "ReturnValue"}
+                                       else
+                                         # Diagnostic only. Microsoft directs filesystem
+                                         # callers to SetSecurityInfo; this lower-level
+                                         # route does not qualify a production backend.
+                                         authority_kernel_set(handle, desired, information)
+                                       end
+              after = WinACL::HandleReader.capture(held)
+              identity_retained = after.complete? && after.identity == before.identity && after.kind == before.kind
+              owner_group_retained = after.complete? && after.security.owner == before.security.owner &&
+                                     after.security.group == before.security.group
+              changed = after.complete? && after.security.dacl.try(&.bytes) != before.security.dacl.try(&.bytes)
+              matches = after.complete? && after.security.dacl_presence.present? && after.security.dacl == desired
+              # Recovery is a separate fixture operation, never a replay of a
+              # failed requested edit. A failed call may already have effects.
+              recovery_code = WinACL::NativeWriterProvider.new.replace(held, recovery, 0x80000004_u32)
+              restored = WinACL::HandleReader.capture(held)
+              recovery_restored = recovery_code == 0 && same_security?(before, restored)
+              row = json({profile: profile, requested_access: profile == "write-only" ? 0x40080_u32 : 0x60080_u32,
+                          operation: operation, information: information,
+                          return_value: returned, code: code, origin: origin, setter_calls: 1,
+                          readback_complete: after.complete?, identity_retained: identity_retained,
+                          owner_group_retained: owner_group_retained, dacl_changed: changed,
+                          readback_matches: matches, control_before: before.security.control,
+                          control_after: after.security.control, recovery_restored: recovery_restored})
+              routes << row
+              # Preserve each completed row even if a later assertion or helper
+              # fails before the bridge emits its final completion receipt.
+              STDERR.puts "writer-authority-route #{row.to_json}"
+              STDERR.flush
+              ensure!(recovery_restored, "Authority route recovery failed: #{recovery_code}")
+            end
+          end
+        end
+        routes.each do |row|
+          ensure!(row["readback_complete"].as_bool && row["identity_retained"].as_bool &&
+                  row["owner_group_retained"].as_bool, "Authority route independent metadata capture differs")
+          code = row["code"].as_i64
+          if row["profile"].as_s == "read-write"
+            ensure!(code == 0, "Readable authority route failed: #{row.to_json}")
+          else
+            ensure!(code.in?({0_i64, 5_i64}), "Write-only authority route returned an unqualified error: #{row.to_json}")
+          end
+          if code == 0
+            ensure!(row["dacl_changed"].as_bool && row["readback_matches"].as_bool,
+              "Successful authority route did not change and match the requested DACL")
+          end
+        end
         json({requested_access: 0x40080_u32, public_result: mutation(refused), public_setter_calls: public_setter_calls,
-              before_unchanged: unchanged, raw_setter_code: code, raw_setter_calls: provider.setter_calls,
-              raw_dacl_changed: changed, raw_readback_matches: matches, identity_retained: identity_retained,
+              before_unchanged: unchanged, routes: routes,
               limited_readback_complete: limited.complete?,
               limited_readback_diagnostic: {operation: limited_diagnostic.not_nil!.operation,
-                                           code: limited_diagnostic.not_nil!.code,
-                                           origin: limited_diagnostic.not_nil!.origin.to_s}})
+                                            code: limited_diagnostic.not_nil!.code,
+                                            origin: limited_diagnostic.not_nil!.origin.to_s}})
       ensure
         prepare(held, recovery)
       end
+    end
+
+    private def self.authority_kernel_set(handle : Void*, desired : WinACL::ACL,
+                                          information : UInt32) : Tuple(Int32, UInt32, String?)
+      descriptor = ProbeNative::SecurityDescriptor.new
+      pointer = pointerof(descriptor).as(Void*)
+      initialized = ProbeNative.initialize_descriptor(pointer, 1_u32)
+      code = initialized == 0 ? LibC.GetLastError : 0_u32
+      ensure!(initialized != 0, "InitializeSecurityDescriptor failed: #{code}")
+      # Keep these ACL bytes alive through SetKernelObjectSecurity: the absolute
+      # descriptor references them instead of copying them into its own storage.
+      bytes = desired.bytes
+      assigned = ProbeNative.descriptor_dacl(pointer, 1, bytes.to_unsafe.as(Void*), 0)
+      code = assigned == 0 ? LibC.GetLastError : 0_u32
+      ensure!(assigned != 0, "SetSecurityDescriptorDacl failed: #{code}")
+      protection = ProbeNative.descriptor_control(pointer, 0x1000_u16, 0x1000_u16)
+      code = protection == 0 ? LibC.GetLastError : 0_u32
+      ensure!(protection != 0, "SetSecurityDescriptorControl failed: #{code}")
+      valid = ProbeNative.valid_descriptor(pointer)
+      code = valid == 0 ? LibC.GetLastError : 0_u32
+      ensure!(valid != 0, "IsValidSecurityDescriptor failed: #{code}")
+      returned = ProbeNative.kernel_security(handle, information, pointer)
+      code = returned == 0 ? LibC.GetLastError : 0_u32
+      {returned, code, returned == 0 ? "LastError" : nil}
     end
 
     private def self.propagation(root : Path) : JSON::Any

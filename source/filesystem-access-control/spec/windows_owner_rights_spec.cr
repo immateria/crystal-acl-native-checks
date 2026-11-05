@@ -16,6 +16,7 @@ private def owner_rights_facts
   policies.each do |policy, grants|
     requests.each_with_index do |request, index|
       allowed = grants[index]
+      denial = allowed ? nil : {operation: "AccessCheck", code: 5, origin: "LastError"}
       rows << JSON.parse({policy: policy, request: request, expected: allowed,
                           descriptor_complete: true, owner_matches_process_user: true,
                           replacement_verified: true,
@@ -24,7 +25,7 @@ private def owner_rights_facts
                                   privilege_count: 0, enabled_privilege_count: 0, restored: true},
                           check: {api_success: true, decision: allowed ? "Allowed" : "Denied",
                                   requested: request, mapped: request, granted_mask: allowed ? request : 0,
-                                  native_error: nil, diagnostic: nil},
+                                  native_error: denial, diagnostic: denial},
                           actual: {acquired: allowed, requested_access: request, open_code: allowed ? 0 : 5}}.to_json)
     end
   end
@@ -38,6 +39,30 @@ private def owner_rights_facts
 end
 
 describe "Windows OWNER_RIGHTS qualification evidence" do
+  it "accepts native access-denied evidence without erasing diagnostic provenance" do
+    # Literal row from Windows runner 41975341742. The API call succeeded;
+    # AccessStatus denied the request and preserved ERROR_ACCESS_DENIED.
+    denied = JSON.parse(%({"policy":"owner-read-control","request":262144,"expected":false,"descriptor_complete":true,"owner_matches_process_user":true,"replacement_verified":true,"token":{"capture_complete":true,"source":"Thread","type":"Impersonation","level":"Impersonation","matches_process_user":true,"privilege_count":0,"enabled_privilege_count":0,"restored":true},"check":{"api_success":true,"decision":"Denied","requested":262144,"mapped":262144,"granted_mask":0,"native_error":{"operation":"AccessCheck","code":5,"origin":"LastError"},"diagnostic":{"operation":"AccessCheck","code":5,"origin":"LastError"}},"actual":{"acquired":false,"requested_access":262144,"open_code":5}}))
+    facts = owner_rights_facts
+    facts["rows"].as_a[4] = denied
+    WindowsACLWorkflows.owner_rights_violations(facts).should be_empty
+  end
+
+  it "requires AccessCheck access-denied provenance in both denied-result diagnostics" do
+    ["native_error", "diagnostic"].each do |field|
+      facts = owner_rights_facts
+      facts["rows"].as_a[4]["check"].as_h[field] = JSON::Any.new(nil)
+      WindowsACLWorkflows.owner_rights_violations(facts).should_not be_empty
+      {"operation" => JSON::Any.new("CreateFileW"),
+       "code"      => JSON::Any.new(1309_i64),
+       "origin"    => JSON::Any.new("ReturnValue")}.each do |key, value|
+        facts = owner_rights_facts
+        facts["rows"].as_a[4]["check"][field].as_h[key] = value
+        WindowsACLWorkflows.owner_rights_violations(facts).should_not be_empty
+      end
+    end
+  end
+
   it "requires all fifteen owner controls instead of trusting a passed flag" do
     WindowsACLWorkflows.owner_rights_violations(owner_rights_facts).should be_empty
     WindowsACLWorkflows.owner_rights_violations(JSON.parse(%({"passed":true}))).should_not be_empty

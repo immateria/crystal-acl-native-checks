@@ -57,10 +57,21 @@ module WindowsACLWorkflows
         errors << "Unqualified effective-token context for #{key}"
       end
       check = row["check"].as_h
+      diagnostics_match = if expected
+                            check["native_error"].raw.nil? && check["diagnostic"].raw.nil?
+                          else
+                            # A successful AccessCheck can deny AccessStatus.
+                            # Preserve the provider's immediate denial error in
+                            # both fields rather than requiring its erasure.
+                            {"native_error", "diagnostic"}.all? do |field|
+                              diagnostic = check[field].as_h
+                              diagnostic["operation"].as_s == "AccessCheck" &&
+                                diagnostic["code"].as_i64 == 5 && diagnostic["origin"].as_s == "LastError"
+                            end
+                          end
       unless check["api_success"].as_bool && check["decision"].as_s == (expected ? "Allowed" : "Denied") &&
              check["requested"].as_i64 == request && check["mapped"].as_i64 == request &&
-             check["granted_mask"].as_i64 == (expected ? request : 0) &&
-             check["native_error"].raw.nil? && check["diagnostic"].raw.nil?
+             check["granted_mask"].as_i64 == (expected ? request : 0) && diagnostics_match
         errors << "AccessCheck result disagrees with owner-rights control #{key}"
       end
       actual = row["actual"].as_h
