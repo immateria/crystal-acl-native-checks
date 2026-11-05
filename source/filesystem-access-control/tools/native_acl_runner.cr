@@ -76,7 +76,9 @@ module NativeACLRunner
       unless bridge
         bridge = (output / {% if flag?(:windows) %} "native-acl-bridge.exe" {% else %} "native-acl-bridge" {% end %}).to_s
         env = {
-          "CRYSTAL_CACHE_DIR" => (output / "compiler-cache").to_s,
+          # Crystal repeats the absolute source path below its cache root.
+          # Keep this component short for native Windows object-file paths.
+          "CRYSTAL_CACHE_DIR" => (output / "c").to_s,
           "CRYSTAL_PATH"      => (SOURCE.parent / "filesystem-capabilities" / "src").to_s +
                             Process::PATH_DELIMITER + File.read(stdlib.stdout_path).strip,
         }
@@ -164,7 +166,7 @@ end
 abort "Choose --output-dir or --temporary-output" unless !!output_argument != temporary_output
 output = nil.as(Path?)
 begin
-  proposed = output_argument || (Path[File.realpath(Dir.tempdir)] / "native-acl-run-#{Random::Secure.hex(16)}").to_s
+  proposed = output_argument || (Path[File.realpath(Dir.tempdir)] / "acl-#{Random::Secure.hex(6)}").to_s
   output = NativeACLRunner::Runner.output_path(proposed.not_nil!)
   exit(NativeACLRunner::Runner.run(output, selected, compiler, binary_argument) ? 0 : 1)
 rescue error

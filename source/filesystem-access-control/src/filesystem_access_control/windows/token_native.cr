@@ -2,6 +2,17 @@
 
 module Filesystem::AccessControl::Windows
   # :nodoc:
+  struct NativeTokenInformation
+    def query(token : Void*, information : UInt32, buffer : Void*, capacity : UInt32)
+      returned = 0_u32
+      success = Native::Windows::ACL.acl_token_info(token, information, buffer,
+        capacity, pointerof(returned)) != 0
+      code = success ? nil : LibC.GetLastError
+      {success, returned, code}
+    end
+  end
+
+  # :nodoc:
   class NativeTokenProvider
     def open_process : Tuple(Void*, Diagnostic?)
       token = Pointer(Void).null
@@ -22,27 +33,7 @@ module Filesystem::AccessControl::Windows
 
     def query(token : Void*, information : UInt32,
               maximum_size : Int32 = TokenReader::MAX_INFORMATION_SIZE) : Tuple(Bytes?, UInt32, Diagnostic?)
-      operation = "GetTokenInformation(#{information})"
-      required = 0_u32
-      result = Native::Windows::ACL.acl_token_info(token, information,
-        Pointer(Void).null, 0_u32, pointerof(required))
-      if result != 0
-        return invalid(operation, "Unexpected success from an empty token-information buffer")
-      end
-      code = LibC.GetLastError
-      unless code == 122_u32
-        return {nil, 0_u32, Diagnostic.new("#{operation}.size", code,
-          ErrorOrigin::LastError, "#{operation} size query failed: #{code}")}
-      end
-      unless 0 < required <= maximum_size
-        return invalid(operation, "Invalid token-information allocation length")
-      end
-      data = Bytes.new(required.to_i)
-      if Native::Windows::ACL.acl_token_info(token, information, data.to_unsafe.as(Void*),
-           required, pointerof(required)) == 0
-        return {data, required, last_error(operation)}
-      end
-      {data, required, nil}
+      TokenInformationReader.read(token, information, maximum_size, NativeTokenInformation.new)
     end
 
     def close(token : Void*) : Nil
@@ -52,10 +43,6 @@ module Filesystem::AccessControl::Windows
     private def last_error(operation : String) : Diagnostic
       code = LibC.GetLastError
       Diagnostic.new(operation, code, ErrorOrigin::LastError, "#{operation} failed: #{code}")
-    end
-
-    private def invalid(operation : String, message : String) : Tuple(Bytes?, UInt32, Diagnostic?)
-      {nil, 0_u32, Diagnostic.new(operation, nil, ErrorOrigin::Validation, message)}
     end
   end
 end

@@ -1,14 +1,9 @@
 {% if flag?(:windows) %}
-  @[Link("kernel32")]
-  lib ACLRunnerCrashNative
-    fun set_error_mode = SetErrorMode(mode : UInt32) : UInt32
-  end
-
-  # Only the disposable child enters this branch. Disable the interactive crash
-  # dialog, then make a native invalid-memory write and retain its real status.
-  if ENV["ACL_RUNNER_ACCESS_VIOLATION_CHILD"]? == "1"
-    ACLRunnerCrashNative.set_error_mode(3_u32)
-    Pointer(UInt8).new(1).value = 1_u8
+  # Crystal catches an actual access violation and exits 1. Terminate this
+  # disposable child through the native API to qualify exception-status
+  # transport separately from Crystal's exception reporting policy.
+  if ENV["ACL_RUNNER_EXCEPTION_STATUS_CHILD"]? == "1"
+    LibC.TerminateProcess(LibC.GetCurrentProcess, 0xc0000005_u32)
     exit 90
   end
 {% end %}
@@ -52,17 +47,20 @@ describe "Native ACL runner completion evidence" do
       NativeACLRunner::Harness.classify("fixture", "", status.to_i32!, windows: true).should eq("crash")
     end
     NativeACLRunner::Harness.classify("fixture", "", 7, windows: true).should eq("incomplete")
+    NativeACLRunner::Harness.classify("fixture", "", 1, windows: true).should eq("incomplete")
     NativeACLRunner::Harness.classify("fixture", "", 0xc0000135_u32.to_i32!, windows: true).should eq("incomplete")
     NativeACLRunner::Harness.classify("fixture", "", 0xc0000005_u32.to_i32!, windows: false).should eq("incomplete")
   end
 
   {% if flag?(:windows) %}
-    it "retains the real exception status of an isolated access-violation child" do
+    it "retains an explicit native exception-status termination from a disposable child" do
       SpecEnvironment.with_temp_dir("acl-runner-native-crash") do |folder|
         result = NativeACLRunner::Harness.execute([Process.executable_path.not_nil!], Path[folder] / "crash", 5.seconds,
-          env: {"ACL_RUNNER_ACCESS_VIOLATION_CHILD" => "1"})
+          env: {"ACL_RUNNER_EXCEPTION_STATUS_CHILD" => "1"})
         result.timed_out.should be_false
-        result.exit_code.should eq(0xc0000005_u32.to_i32!)
+        stderr = File.exists?(result.stderr_path) ? File.read(result.stderr_path)[0, 2048] : "<not captured>"
+        result.exit_code.should eq(0xc0000005_u32.to_i32!),
+          "Native status fixture returned #{result.exit_code}; harness error=#{result.error}; stderr=#{stderr}"
         NativeACLRunner::Harness.classify("fixture", File.read(result.stdout_path), result.exit_code,
           windows: true).should eq("crash")
       end

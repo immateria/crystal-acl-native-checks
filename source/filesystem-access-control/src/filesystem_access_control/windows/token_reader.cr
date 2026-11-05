@@ -1,4 +1,5 @@
 require "./observation"
+require "./token_information"
 
 module Filesystem::AccessControl::Windows
   enum TokenContext

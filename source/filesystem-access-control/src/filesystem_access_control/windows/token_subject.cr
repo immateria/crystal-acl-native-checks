@@ -211,12 +211,19 @@ module Filesystem::AccessControl::Windows
           TokenElevationType.new(value)
         end
         elevated = observe(information.elevated?, queries, handle, 20_u32, "TokenElevation") { |data, length| decode_enum(data, length) != 0 }
-        restrictions = observe(information.has_restrictions?, queries, handle, 21_u32, "TokenHasRestrictions") { |data, length| decode_enum(data, length) != 0 }
+        restrictions = observe(information.has_restrictions?, queries, handle, 21_u32, "TokenHasRestrictions") { |data, length| decode_boolean(data, length) }
         TokenSubjectSnapshot.new(identity, information, groups, restricted, privileges,
           integrity, elevation_type, elevated, restrictions)
       ensure
         provider.close(handle)
       end
+    end
+
+    private def self.decode_boolean(data : Bytes?, length : UInt32) : Bool
+      unless data && length == 1 && length <= data.size && data.size <= MAX_INFORMATION_SIZE
+        raise ArgumentError.new("Invalid token BOOLEAN length")
+      end
+      data[0] != 0
     end
 
     private def self.subject_unavailable(token, information, diagnostic) : TokenSubjectSnapshot

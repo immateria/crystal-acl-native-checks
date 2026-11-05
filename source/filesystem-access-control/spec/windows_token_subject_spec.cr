@@ -19,6 +19,8 @@ private class TokenSubjectFixtureProvider
   property empty_restricted = false
   property exceed_limit = false
   property failed_buffer = false
+  property restriction_byte = 9_u8
+  property restriction_length = 1_u32
 
   def open_process
     @opened << :process
@@ -79,13 +81,14 @@ private class TokenSubjectFixtureProvider
                "02000000efcdab89feffffff02000080785634120000000000010000".hexbytes.copy_to(bytes)
              end
              bytes
+           when 21
+             Bytes[@restriction_byte, 0xa5_u8, 0x5a_u8, 0xff_u8]
            else
              value = case information
                      when  8 then token.address == 22 ? 2_u32 : 1_u32
                      when  9 then 2_u32
                      when 18 then 3_u32
                      when 20 then 0_u32
-                     when 21 then 9_u32
                      else         raise "Unexpected token information #{information}"
                      end
              bytes = Bytes.new(4)
@@ -93,7 +96,7 @@ private class TokenSubjectFixtureProvider
              bytes
            end
     data = Bytes.new(maximum_size + 1, 0_u8) if @exceed_limit && information == 2
-    length = data.size.to_u32
+    length = information == 21 ? @restriction_length : data.size.to_u32
     if information == @fault_query
       case @malformed
       when :external_pointer
@@ -105,6 +108,8 @@ private class TokenSubjectFixtureProvider
         put32(data, 0, UInt32::MAX)
       when :short
         length = 3_u32
+      when :one_byte
+        length = 1_u32
       when :overreported
         length += 1
       when :invalid_elevation
@@ -140,7 +145,69 @@ private class TokenSubjectFixtureProvider
   end
 end
 
+# Mirrors the real GetTokenInformation boundary: class 20 refuses the zero-size
+# probe with ERROR_BAD_LENGTH, while class 21 reports one initialized byte.
+private class TokenInformationFixtureProvider
+  getter calls = [] of Tuple(UInt32, UInt32, UInt64)
+  property failure : UInt32?
+
+  def query(token : Void*, information : UInt32, buffer : Void*, capacity : UInt32)
+    @calls << {information, capacity, buffer.address & 3_u64}
+    if capacity == 0
+      return {false, information == 21 ? 1_u32 : 4_u32,
+              information == 20 ? 24_u32 : 122_u32}
+    end
+    if failure = @failure
+      return {false, 0_u32, failure}
+    end
+    bytes = Bytes.new(buffer.as(UInt8*), capacity.to_i)
+    bytes.fill(0xa5_u8)
+    if information == 21
+      bytes[0] = 9_u8
+      {true, 1_u32, nil.as(UInt32?)}
+    else
+      IO::ByteFormat::SystemEndian.encode(2_u32, bytes[0, 4])
+      {true, 4_u32, nil.as(UInt32?)}
+    end
+  end
+end
+
 describe "Windows token subject capture" do
+  it "decodes only the returned BOOLEAN byte of token filtering history" do
+    [0_u8, 1_u8, 9_u8, 255_u8].each do |value|
+      provider = TokenSubjectFixtureProvider.new
+      provider.restriction_byte = value
+      snapshot = SubjectWindows::TokenReader.capture_subject(
+        information: SubjectWindows::TokenSubjectInformation::HasRestrictions, provider: provider)
+      snapshot.complete?.should be_true
+      snapshot.has_restrictions.value.should eq(value != 0)
+      snapshot.diagnostics.should be_empty
+    end
+  end
+
+  it "rejects other filtering-history extents without weakening DWORD scalar fields" do
+    [0_u32, 2_u32, 3_u32, 4_u32, 5_u32].each do |length|
+      provider = TokenSubjectFixtureProvider.new
+      provider.restriction_length = length
+      snapshot = SubjectWindows::TokenReader.capture_subject(provider: provider)
+      snapshot.complete?.should be_false
+      snapshot.token.complete?.should be_true
+      snapshot.has_restrictions.state.unavailable?.should be_true
+      snapshot.diagnostics.size.should eq(1)
+      snapshot.diagnostics.first.operation.should eq("TokenHasRestrictions")
+      snapshot.diagnostics.first.origin.validation?.should be_true
+    end
+    [18_u32, 20_u32].each do |information|
+      provider = TokenSubjectFixtureProvider.new
+      provider.fault_query = information
+      provider.malformed = :one_byte
+      snapshot = SubjectWindows::TokenReader.capture_subject(provider: provider)
+      snapshot.complete?.should be_false
+      snapshot.has_restrictions.state.captured?.should be_true
+      snapshot.diagnostics.size.should eq(1)
+    end
+  end
+
   it "owns complete groups, restrictions, privileges, integrity and elevation observations" do
     provider = TokenSubjectFixtureProvider.new
     snapshot = SubjectWindows::TokenReader.capture_subject(provider: provider)
@@ -379,6 +446,57 @@ describe "Windows token subject capture" do
       SubjectWindows::TokenSubjectSnapshot.new(failed, captured.information,
         captured.groups, captured.restricted_sids, captured.privileges,
         captured.integrity, captured.elevation_type, captured.elevated, captured.has_restrictions)
+    end
+  end
+end
+
+describe SubjectWindows::TokenInformationReader do
+  it "queries fixed elevation storage directly instead of depending on a size-probe error" do
+    provider = TokenInformationFixtureProvider.new
+    data, returned, diagnostic = SubjectWindows::TokenInformationReader.read(
+      Pointer(Void).new(11_u64), 20_u32, 4, provider)
+    diagnostic.should be_nil
+    returned.should eq(4_u32)
+    data.not_nil!.hexstring.should eq("02000000")
+    provider.calls.should eq([{20_u32, 4_u32, 0_u64}])
+  end
+
+  it "provides DWORD-aligned capacity without fabricating initialized class-21 bytes" do
+    provider = TokenInformationFixtureProvider.new
+    data, returned, diagnostic = SubjectWindows::TokenInformationReader.read(
+      Pointer(Void).new(11_u64), 21_u32, 4, provider)
+    diagnostic.should be_nil
+    returned.should eq(1_u32)
+    data.not_nil!.size.should eq(4)
+    data.not_nil!.hexstring.should eq("09a5a5a5")
+    provider.calls.should eq([{21_u32, 4_u32, 0_u64}])
+  end
+
+  it "honors the scalar allocation budget before calling the native query" do
+    [20_u32, 21_u32].each do |information|
+      provider = TokenInformationFixtureProvider.new
+      data, returned, diagnostic = SubjectWindows::TokenInformationReader.read(
+        Pointer(Void).new(11_u64), information, 3, provider)
+      data.should be_nil
+      returned.should eq(0_u32)
+      diagnostic.not_nil!.origin.validation?.should be_true
+      provider.calls.should be_empty
+    end
+  end
+
+  it "retains failed scalar-query origin and allocated capacity without a weaker retry" do
+    [20_u32, 21_u32].each do |information|
+      provider = TokenInformationFixtureProvider.new
+      provider.failure = 5_u32
+      data, returned, diagnostic = SubjectWindows::TokenInformationReader.read(
+        Pointer(Void).new(11_u64), information, 4, provider)
+      data.should_not be_nil
+      data.not_nil!.size.should eq(4)
+      returned.should eq(0_u32)
+      diagnostic.not_nil!.operation.should eq("GetTokenInformation(#{information})")
+      diagnostic.not_nil!.code.should eq(5_u32)
+      diagnostic.not_nil!.origin.last_error?.should be_true
+      provider.calls.should eq([{information, 4_u32, 0_u64}])
     end
   end
 end

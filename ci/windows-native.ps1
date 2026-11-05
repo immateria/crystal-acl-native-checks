@@ -12,7 +12,9 @@ $assets = @{
     '1.21.0' = @{ sha256 = '1c691057aa9b17623e021a40f569ca10ce454eae068b61bba2615893249751a7'; bytes = 51869479 }
     '1.22.2' = @{ sha256 = '0d9d7202d3fd3f95712a6137d0e5f3c866408ef65339acbb3d6c3a9dc2623fd1'; bytes = 55116878 }
 }
-$base = Join-Path $env:RUNNER_TEMP ('acl-native-' + [Guid]::NewGuid().ToString('N'))
+# Crystal embeds the full source path in cache directory names. A short root
+# keeps native MSVC temporary object paths within the Windows path limit.
+$base = Join-Path $env:RUNNER_TEMP ('a' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $null = New-Item -ItemType Directory -Path $base
 Write-Host "ACL_OUTPUT_ROOT $base"
 $gates = [Collections.Generic.List[object]]::new()
@@ -53,7 +55,7 @@ function Write-AclLog([string]$Path, [string]$Name) {
 }
 function Invoke-AclGate([string]$Name, [string]$File, [string[]]$Arguments,
                         [string]$Cwd, [double]$Seconds = 180, [string]$Marker = '') {
-    $env:CRYSTAL_CACHE_DIR = Join-Path $base "cache-$Name"
+    $env:CRYSTAL_CACHE_DIR = Join-Path $base "k$($gates.Count)"
     $result = Invoke-AclProcess -FilePath $File -ArgumentList $Arguments -WorkingDirectory $Cwd -Prefix (Join-Path $base $Name) -TimeoutSeconds $Seconds
     $passed = $result.ExitCode -eq 0 -and -not $result.TimedOut -and -not $result.OutputLimited -and -not $result.Error
     if ($passed -and $Marker) {
@@ -139,7 +141,7 @@ try {
     if ($digest -cne $assets[$CrystalVersion].sha256 -or (Get-Item -LiteralPath $archive).Length -ne $assets[$CrystalVersion].bytes) { throw 'Official compiler archive hash/length differs from pinned asset' }
     Save-AclJson (Join-Path $base 'compiler-asset.json') @{ url = $assetUrl; sha256 = $digest; bytes = (Get-Item -LiteralPath $archive).Length; verification = 'Pinned official GitHub release asset metadata checked 2026-11-04' }
     Write-AclReceipt (Join-Path $base 'compiler-asset.json') 'compiler-asset.json'
-    $compilerRoot = Join-Path $base 'compiler'
+    $compilerRoot = Join-Path $base 'c'
     Expand-Archive -LiteralPath $archive -DestinationPath $compilerRoot
     $executables = @(Get-ChildItem -LiteralPath $compilerRoot -Filter crystal.exe -File -Recurse)
     if ($executables.Count -ne 1) { throw 'Expected one compiler executable in portable archive' }
@@ -151,7 +153,7 @@ try {
     $stdlib = Invoke-AclGate 'compiler-stdlib' $crystal @('env', 'CRYSTAL_PATH') $base 20
     if ($stdlib.ExitCode -ne 0 -or $stdlib.Error) { throw 'Compiler standard library query failed' }
 
-    $source = Join-Path $base 'source'
+    $source = Join-Path $base 's'
     Copy-Item -LiteralPath (Join-Path $PackageRoot 'source') -Destination $source -Recurse
     $acl = Join-Path $source 'filesystem-access-control'
     $capabilities = Join-Path $source 'filesystem-capabilities'
@@ -174,7 +176,7 @@ try {
     # Receipts are retained only in the job log. No artifact/cache upload exists.
     Get-ChildItem -LiteralPath $base -File -Recurse | Where-Object { $_.Extension -eq '.json' -or $_.Extension -eq '.stdout' -or $_.Extension -eq '.stderr' } | Sort-Object FullName | ForEach-Object {
         $relative = [IO.Path]::GetRelativePath($base, $_.FullName).Replace('\', '/')
-        if ($relative.StartsWith('source/') -or $relative.StartsWith('compiler/') -or $relative.StartsWith('cache-')) { return }
+        if ($relative.StartsWith('s/') -or $relative.StartsWith('c/') -or $relative -match '^k\d+/') { return }
         if ($_.Extension -eq '.json') { Write-AclReceipt $_.FullName $relative }
         elseif ($relative.StartsWith('behavior/')) {
             if ($_.Extension -eq '.stdout' -and $_.Name.StartsWith('windows.')) {
