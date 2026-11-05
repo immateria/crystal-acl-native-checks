@@ -242,8 +242,22 @@ module WindowsACLWorkflows
       desired = requested | 0x100000_u32
       handle = LibC.CreateFileW(name.to_unsafe, desired, 7_u32,
         Pointer(LibC::SECURITY_ATTRIBUTES).null, 3_u32, 0x00200080_u32, Pointer(Void).null)
+      code = handle.address == UInt64::MAX ? LibC.GetLastError : 0_u32
+      acquired_data_io(handle, requested, desired, code)
+    end
+
+    private def self.data_reopen(held : Void*, requested : UInt32)
+      # Diagnostic route only: acquire a NEW handle under the selected thread
+      # token, without supplying a pathname or backup semantics. The library never
+      # reopens supplied handles. ReOpenFile permits flags, not file attributes.
+      desired = requested | 0x100000_u32
+      handle = LibC.ReOpenFile(held, desired, 7_u32, 0x00200000_u32)
+      code = handle.address == UInt64::MAX ? LibC.GetLastError : 0_u32
+      acquired_data_io(handle, requested, desired, code)
+    end
+
+    private def self.acquired_data_io(handle : Void*, requested : UInt32, desired : UInt32, code : UInt32)
       if handle.address == UInt64::MAX
-        code = LibC.GetLastError
         return {acquired: false, open_code: code, desired_access: desired, io_ok: nil.as(Bool?), io_error: nil.as(UInt32?)}
       end
       begin
@@ -363,6 +377,10 @@ module WindowsACLWorkflows
                   stage.call("access-check-returned")
                   expected = index == 1
                   ensure!(check.api_success == true && check.allowed? == expected, "Restricted-token check was incomplete or unexpected")
+                  acquisition_check = WinACL::Evaluator.check(result.after.not_nil!.security, subject: subject,
+                    permissions: WinACL::Rights.new(0x100001_u32), kind: Filesystem::AccessControl::Target::File)
+                  ensure!(acquisition_check.api_success == true && acquisition_check.allowed? == expected,
+                    "Restricted-token check for the exact acquisition request was incomplete or unexpected")
                   stage.call("set-thread-token")
                   if ProbeNative.set_thread_token(Pointer(Void*).null, subject) == 0
                     raise "SetThreadToken failed: #{LibC.GetLastError}"
@@ -373,6 +391,7 @@ module WindowsACLWorkflows
                     # observations; they are assessed after restoring context.
                     observed = WinACL::TokenReader.capture_subject(WinACL::TokenContext::Effective)
                     actual = data_open(path, 1_u32)
+                    reopened = data_reopen(held, 1_u32)
                   ensure
                     abort "RevertToSelf failed: #{LibC.GetLastError}" if ProbeNative.revert == 0
                   end
@@ -381,6 +400,9 @@ module WindowsACLWorkflows
                               expected_acquisition: expected,
                               decision: check.decision.to_s, api_success: check.api_success,
                               granted_mask: check.granted_mask, actual: actual,
+                              acquisition_check: {requested: 0x100001_u32, decision: acquisition_check.decision.to_s,
+                                                  api_success: acquisition_check.api_success, granted_mask: acquisition_check.granted_mask},
+                              diagnostic_reopen: reopened, reopen_flags: 0x00200000_u32,
                               capture_complete: observed.complete?, token_source: observed.token.source.try(&.to_s),
                               capture_diagnostics: observed.diagnostics.map { |item|
                                 {operation: item.operation, code: item.code, origin: item.origin.to_s}
@@ -400,6 +422,9 @@ module WindowsACLWorkflows
                     ensure!(observed.groups.value.not_nil!.entries.any? { |item| item.sid == everyone && item.deny_only? && !item.enabled? },
                       "Expected deny-only Everyone group attributes were not observed")
                   end
+                  ensure!(reopened[:acquired] == expected, "Restricted diagnostic ReOpenFile acquisition disagrees")
+                  ensure!(reopened[:open_code] == 5_u32, "Restricted diagnostic ReOpenFile failed for a reason other than access denial") unless reopened[:acquired]
+                  ensure!(reopened[:io_ok] == true, "Restricted diagnostic ReOpenFile data I/O failed") if reopened[:acquired]
                   ensure!(actual[:acquired] == expected, "Restricted fresh acquisition disagrees")
                   ensure!(actual[:open_code] == 5_u32, "Restricted acquisition failed for a reason other than access denial") unless actual[:acquired]
                   ensure!(actual[:io_ok] == true, "Restricted acquired data I/O failed") if actual[:acquired]

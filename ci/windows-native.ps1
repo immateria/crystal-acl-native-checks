@@ -78,15 +78,44 @@ function Get-AclHashes([string]$Root) {
     }
     return $rows
 }
+function Get-AclVolumeProfile([string]$VolumeRoot) {
+    $volumeProfile = [ordered]@{
+        state = 'Unavailable'; volume_root = $VolumeRoot; device_id = $null
+        drive_type = $null; filesystem = $null; volume_name = $null; diagnostic = $null
+    }
+    if ($VolumeRoot -notmatch '\A[A-Za-z]:[\\/]\z') {
+        $volumeProfile.diagnostic = @{ operation = 'Get-CimInstance Win32_LogicalDisk'; message = 'Path root is not a drive letter; no volume profile queried' }
+        return $volumeProfile
+    }
+    try {
+        $device = $VolumeRoot.Substring(0, 2).ToUpperInvariant()
+        $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$device'" -ErrorAction Stop | Select-Object -First 1
+        if (-not $disk) { throw 'Win32_LogicalDisk returned no matching drive' }
+        $volumeProfile.state = 'Captured'
+        $volumeProfile.device_id = $disk.DeviceID
+        $volumeProfile.drive_type = $disk.DriveType
+        $volumeProfile.filesystem = $disk.FileSystem
+        $volumeProfile.volume_name = $disk.VolumeName
+        if (-not $disk.FileSystem) {
+            $volumeProfile.diagnostic = @{ operation = 'Get-CimInstance Win32_LogicalDisk'; message = 'Volume was observed but FileSystem was not reported' }
+        }
+    } catch {
+        $volumeProfile.diagnostic = @{ operation = 'Get-CimInstance Win32_LogicalDisk'; message = $_.Exception.Message }
+    }
+    return $volumeProfile
+}
 
 try {
     $os = Get-CimInstance Win32_OperatingSystem
+    $fixtureTemp = [IO.Path]::GetTempPath()
     $hostEvidence = @{
         schema = 'acl-windows-ci-host'; version = 1; requested_crystal = $CrystalVersion
         os = @{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; architecture = $os.OSArchitecture }
         powershell = $PSVersionTable.PSVersion.ToString(); process_architecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
         image_os = $env:ImageOS; image_version = $env:ImageVersion
         repository = $env:GITHUB_REPOSITORY; source_revision = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT
+        fixture = @{ temporary_directory = $fixtureTemp; volume = (Get-AclVolumeProfile ([IO.Path]::GetPathRoot($fixtureTemp))) }
+        work = @{ build_directory = $base; source_directory = (Join-Path $base 's'); volume = (Get-AclVolumeProfile ([IO.Path]::GetPathRoot($base))) }
     }
     Save-AclJson (Join-Path $base 'host.json') $hostEvidence
     Write-AclReceipt (Join-Path $base 'host.json') 'host.json'
