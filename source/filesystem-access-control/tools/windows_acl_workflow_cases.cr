@@ -175,8 +175,11 @@ module WindowsACLWorkflows
         ensure!(refused.execution.not_attempted?, "TargetOnly directory mutation reached setter")
         result = replace(held, desired, WinACL::PropagationPolicy::NativePropagation)
         ensure!(result.verified? && result.descendants.unverified?, "Native propagation did not retain target/descendant scope")
+        future = parent / "future-child"
+        File.write(future, "future")
         child_has_candidate = false
         protected_has_candidate = false
+        future_has_candidate = false
         [{child, false}, {protected_child, true}].each do |path, protected_case|
           with_handle(path, 0x20080_u32) do |handle|
             snapshot = WinACL::HandleReader.capture(handle)
@@ -185,9 +188,15 @@ module WindowsACLWorkflows
             protected_case ? (protected_has_candidate = present) : (child_has_candidate = present)
           end
         end
-        ensure!(child_has_candidate && !protected_has_candidate, "Protected/unprotected child propagation differed from fixture contract")
+        with_handle(future, 0x20080_u32) do |handle|
+          snapshot = WinACL::HandleReader.capture(handle)
+          ensure!(snapshot.complete?, "Future child readback failed")
+          future_has_candidate = snapshot.security.dacl.not_nil!.entries.any? { |entry| entry.trustee == everyone && entry.inheritance.inherited? }
+        end
+        ensure!(child_has_candidate && !protected_has_candidate && future_has_candidate, "Existing/protected/future child inheritance differed from fixture contract")
         json({passed: true, mutation: mutation(result), unprotected_inherited: child_has_candidate,
-              protected_inherited: protected_has_candidate, descendant_check: "two-explicit-fixtures-only"})
+              protected_inherited: protected_has_candidate, future_inherited: future_has_candidate,
+              descendant_check: "three-explicit-fixtures-only"})
       ensure
         prepare(held, recovery)
       end

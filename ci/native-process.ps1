@@ -15,6 +15,7 @@ public sealed class AclNativeProcessResult {
     public int? ExitCode { get; set; }
     public bool TimedOut { get; set; }
     public bool OutputLimited { get; set; }
+    public bool OutputComplete { get; set; }
     public long DurationMilliseconds { get; set; }
     public string StdoutPath { get; set; }
     public string StderrPath { get; set; }
@@ -23,16 +24,20 @@ public sealed class AclNativeProcessResult {
 
 public static class AclNativeProcess {
     private sealed class Budget { public int Limited; }
-    private static void Drain(Stream input, string path, int maximum, Budget budget) {
-        using (var output = File.Create(path)) {
+    private sealed class DrainState { public string Error; }
+    private static void Drain(Stream input, Stream output, int maximum, Budget budget, DrainState state) {
+        try {
             var buffer = new byte[8192];
             int total = 0, count;
             while ((count = input.Read(buffer, 0, buffer.Length)) != 0) {
                 int kept = Math.Min(count, maximum - total);
                 if (kept > 0) output.Write(buffer, 0, kept);
+                output.Flush();
                 total += kept;
                 if (kept < count) { Interlocked.Exchange(ref budget.Limited, 1); break; }
             }
+        } catch (Exception error) {
+            state.Error = error.GetType().Name + ": " + error.Message;
         }
     }
     public static AclNativeProcessResult Run(string file, string[] arguments, string cwd,
@@ -40,7 +45,10 @@ public static class AclNativeProcess {
         var result = new AclNativeProcessResult { FilePath = file, Arguments = arguments,
             StdoutPath = prefix + ".stdout", StderrPath = prefix + ".stderr" };
         var watch = Stopwatch.StartNew();
-        using (var process = new Process()) {
+        var process = new Process();
+        FileStream outputFile = null, errorFile = null;
+        bool readersComplete = false;
+        try {
             try {
                 process.StartInfo = new ProcessStartInfo(file) { WorkingDirectory = cwd,
                     UseShellExecute = false, RedirectStandardOutput = true,
@@ -48,8 +56,15 @@ public static class AclNativeProcess {
                 foreach (string argument in arguments) process.StartInfo.ArgumentList.Add(argument);
                 process.Start();
                 var budget = new Budget();
-                var stdout = Task.Run(() => Drain(process.StandardOutput.BaseStream, result.StdoutPath, maximum, budget));
-                var stderr = Task.Run(() => Drain(process.StandardError.BaseStream, result.StderrPath, maximum, budget));
+                var outputState = new DrainState();
+                var errorState = new DrainState();
+                // The supervising scope owns the files. A descendant can keep
+                // a pipe open, but cannot keep these diagnostic files locked.
+                outputFile = new FileStream(result.StdoutPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                errorFile = new FileStream(result.StderrPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                Stream output = outputFile, error = errorFile;
+                var stdout = Task.Run(() => Drain(process.StandardOutput.BaseStream, output, maximum, budget, outputState));
+                var stderr = Task.Run(() => Drain(process.StandardError.BaseStream, error, maximum, budget, errorState));
                 while (!process.WaitForExit(25)) {
                     if (Volatile.Read(ref budget.Limited) != 0 || watch.ElapsedMilliseconds >= timeoutMs) break;
                 }
@@ -59,16 +74,29 @@ public static class AclNativeProcess {
                     try { process.Kill(true); } catch (InvalidOperationException) { }
                 }
                 if (!process.WaitForExit(1000)) result.Error = "Child did not stop within bounded cleanup";
-                if (!Task.WaitAll(new[] { stdout, stderr }, 1000)) {
+                if (process.HasExited && !result.TimedOut && !result.OutputLimited) result.ExitCode = process.ExitCode;
+                readersComplete = Task.WaitAll(new[] { stdout, stderr }, 1000);
+                if (!readersComplete) {
                     result.Error = "Output did not close within bounded cleanup";
-                    process.StandardOutput.Close(); process.StandardError.Close();
+                } else if (outputState.Error != null || errorState.Error != null) {
+                    result.Error = "Output drain failed: " + (outputState.Error ?? errorState.Error);
                 }
                 result.OutputLimited |= Volatile.Read(ref budget.Limited) != 0;
-                if (process.HasExited && !result.TimedOut && !result.OutputLimited) result.ExitCode = process.ExitCode;
+                result.OutputComplete = readersComplete && !result.TimedOut && !result.OutputLimited &&
+                    outputState.Error == null && errorState.Error == null;
+                if (result.OutputLimited) result.ExitCode = null;
             } catch (Exception error) {
                 result.Error = error.GetType().Name + ": " + error.Message;
                 try { if (!process.HasExited) process.Kill(true); } catch { }
-            } finally { result.DurationMilliseconds = watch.ElapsedMilliseconds; }
+            }
+        } finally {
+            // Closing an inherited pipe can itself wait for a blocked reader.
+            // Release owned log files synchronously; defer pipe cleanup after
+            // an incomplete drain without converting it to successful output.
+            outputFile?.Dispose(); errorFile?.Dispose();
+            if (readersComplete) process.Dispose();
+            else Task.Run(() => { try { process.Dispose(); } catch { } });
+            result.DurationMilliseconds = watch.ElapsedMilliseconds;
         }
         return result;
     }

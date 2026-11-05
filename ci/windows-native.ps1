@@ -37,7 +37,12 @@ function Write-AclReceipt([string]$Path, [string]$Name) {
 }
 function Write-AclLog([string]$Path, [string]$Name) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    $text = [IO.File]::ReadAllText($Path)
+    try { $text = [IO.File]::ReadAllText($Path) }
+    catch {
+        $failures.Add("Diagnostic log unavailable: $Name")
+        Write-Host "ACL_LOG_UNAVAILABLE path=$Name error=$($_.Exception.Message)"
+        return
+    }
     Write-Host "ACL_LOG_BEGIN $Name"
     if ($text.Length -gt 65536) {
         Write-Host $text.Substring(0, 32768)
@@ -94,6 +99,9 @@ try {
     if ($vs.ExitCode -ne 0 -or $vs.Error -or $vs.TimedOut -or $vs.OutputLimited) { throw 'vswhere did not locate the C++ toolchain' }
     $install = [IO.File]::ReadAllText($vs.StdoutPath).Trim()
     $devCmd = Join-Path $install 'Common7\Tools\VsDevCmd.bat'
+    # VsDevCmd can otherwise start a telemetry descendant that outlives CMD
+    # while retaining its inherited stdout/stderr pipe handles.
+    $env:VSCMD_SKIP_SENDTELEMETRY = '1'
     # CMD does not parse embedded quotes using the Windows CRT rules applied by
     # ProcessStartInfo.ArgumentList. Keep command syntax inside a batch file;
     # pass only its simple filename at the process boundary.
@@ -119,6 +127,7 @@ try {
         vs_installation = $install; vc_tools = $env:VCToolsVersion; windows_sdk = $env:WindowsSDKVersion
         linker = (Get-Command link.exe -ErrorAction Stop).Source; compiler = (Get-Command cl.exe -ErrorAction Stop).Source
         developer_mode = (Get-ItemPropertyValue -Path $devMode -Name AllowDevelopmentWithoutDevLicense)
+        vs_telemetry_disabled = $env:VSCMD_SKIP_SENDTELEMETRY
     }
     Write-AclReceipt (Join-Path $base 'toolchain.json') 'toolchain.json'
 
