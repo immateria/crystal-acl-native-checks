@@ -62,9 +62,17 @@ hashes, source hashes and all 32 completed observations were checked locally.
 The tested snapshot has a 119-entry manifest; later README-only revisions do
 not extend that native qualification to a new source revision.
 
-The next authority fixture deletes all observed token privileges, proves fresh
-child WRITE_DAC denial with explicit OWNER_RIGHTS ACEs, then samples the
-parent and children independently after one native setter call. Its result
-keeps successful propagation, skipped samples, failure with observed effects
-and failure without observed effects distinct. Native qualification is pending
-for this added case until a run at its exact source revision completes.
+The child-authority follow-up, [snapshot 5cc4305](https://github.com/immateria/crystal-acl-native-checks/commit/5cc4305728dbf5e4d8c2b0e08c6a8eb07d585d19),
+passed [all four native Windows cells](https://github.com/immateria/crystal-acl-native-checks/actions/runs/41986667496):
+138 specs, two probes and nine behavior cases per cell. The disposable helper
+removes all observed privileges, explicitly assigns child owners and uses
+OWNER_RIGHTS ACEs to deny WRITE_DAC. Twelve fresh acquisition controls per
+profile prove the denials before and after one native parent setter call.
+The parent verifies and the ordinary child updates. The denied file,
+denied directory, its grandchild and protected control retain byte-identical
+descriptors. The call succeeds with skipped samples; a native failed setter
+after partial effects remains unqualified. Public descendants remain
+unverified. All 36 completed observations passed local comparison replay;
+114 copied source files and 66 exported payload files per profile passed
+hash checks against the tested 121-entry manifest. Later documentation-only
+revisions do not extend that native qualification to a new source revision.
