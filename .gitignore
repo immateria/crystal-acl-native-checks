@@ -1,0 +1,6 @@
+/bin/
+/receipts/
+/crystal-cache/
+*.exe
+*.obj
+*.pdb

@@ -1,0 +1,15 @@
+name: filesystem-access-control
+version: 0.1.0
+
+authors:
+  - Crystal community
+
+description: |
+  Native ACL inspection, permission explanations and opt-in editing for opened filesystem objects.
+
+crystal: '>= 1.21.0'
+license: MIT
+
+dependencies:
+  filesystem-capabilities:
+    github: silph-code/filesystem-capabilities.cr

@@ -1,0 +1,43 @@
+name: Windows ACL native qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-acl-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: ${{ matrix.os }} / Crystal ${{ matrix.crystal }} / MSVC x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [windows-2022, windows-2025]
+        crystal: ['1.21.0', '1.22.2']
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Fetch this immutable public source revision
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -notmatch '\A[0-9a-f]{40}\z') { throw 'Expected an immutable source commit' }
+          git init $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          git -C $env:GITHUB_WORKSPACE remote add origin "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
+          if ($LASTEXITCODE -ne 0) { throw 'git remote failed' }
+          git -C $env:GITHUB_WORKSPACE fetch --no-tags --depth=1 origin $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'git fetch failed' }
+          git -C $env:GITHUB_WORKSPACE checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'git checkout failed' }
+          if ((git -C $env:GITHUB_WORKSPACE rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Source revision differs' }
+      - name: Compile and run the Windows ACL profile
+        run: |
+          & "$env:GITHUB_WORKSPACE/ci/windows-native.ps1" -CrystalVersion '${{ matrix.crystal }}' -PackageRoot $env:GITHUB_WORKSPACE

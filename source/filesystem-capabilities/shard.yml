@@ -1,0 +1,11 @@
+name: filesystem-capabilities
+version: 0.1.0
+
+authors:
+  - Crystal community
+
+description: |
+  Owned directory capabilities, component-wise traversal, ordinary file operations and listing.
+
+crystal: '>= 1.21.0'
+license: MIT

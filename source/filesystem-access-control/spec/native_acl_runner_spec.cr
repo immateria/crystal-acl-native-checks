@@ -1,0 +1,117 @@
+{% if flag?(:windows) %}
+  @[Link("kernel32")]
+  lib ACLRunnerCrashNative
+    fun set_error_mode = SetErrorMode(mode : UInt32) : UInt32
+  end
+
+  # Only the disposable child enters this branch. Disable the interactive crash
+  # dialog, then make a native invalid-memory write and retain its real status.
+  if ENV["ACL_RUNNER_ACCESS_VIOLATION_CHILD"]? == "1"
+    ACLRunnerCrashNative.set_error_mode(3_u32)
+    Pointer(UInt8).new(1).value = 1_u8
+    exit 90
+  end
+{% end %}
+
+require "./spec_helper"
+require "../tools/native_acl_runner_support"
+
+describe "Native ACL runner completion evidence" do
+  it "requires one matching complete observation and an agreeing exit status" do
+    row = %({"schema":"filesystem-native-acl-observation","version":1,"case_id":"darwin.held-unlink","harness_status":"complete","expectations_met":true,"violations":[],"observation":{}})
+    NativeACLRunner::Harness.classify("darwin.held-unlink", row + "\n", 0).should eq("matched")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", row + "\n", 1).should eq("exit-mismatch")
+    NativeACLRunner::Harness.classify("darwin.hardlink-alias", row, 0).should eq("incomplete")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", row + "\n" + row, 0).should eq("malformed")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", "", 0).should eq("incomplete")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", "{", 0).should eq("malformed")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", row.sub("\"violations\":[]", "\"violations\":[\"different ACL\"]"), 0).should eq("malformed")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", row.sub("\"version\":1", "\"version\":2"), 0).should eq("incomplete")
+  end
+
+  it "retains timeout, crash and output-limit outcomes above ACL results" do
+    NativeACLRunner::Harness.classify("darwin.held-unlink", "", nil, timed_out: true).should eq("timeout")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", "", nil, crashed: true).should eq("crash")
+    NativeACLRunner::Harness.classify("darwin.held-unlink", "", nil, output_limited: true).should eq("output-limit")
+    SpecEnvironment.with_temp_dir("acl-runner-deadline") do |folder|
+      command = {% if flag?(:windows) %}
+                  ["ping.exe", "-n", "6", "127.0.0.1"]
+                {% else %}
+                  ["/bin/sleep", "5"]
+                {% end %}
+      result = NativeACLRunner::Harness.execute(command, Path[folder] / "sleep", 50.milliseconds)
+      result.timed_out.should be_true
+      result.exit_code.should be_nil
+      result.duration_ms.should be < 2000
+    end
+  end
+
+  it "recognizes explicit Windows exception statuses without treating ordinary failed exits as crashes" do
+    [0xc0000005_u32, 0xc000001d_u32, 0xc0000094_u32,
+     0xc00000fd_u32, 0xc0000374_u32, 0xc0000409_u32].each do |status|
+      NativeACLRunner::Harness.classify("fixture", "", status.to_i32!, windows: true).should eq("crash")
+    end
+    NativeACLRunner::Harness.classify("fixture", "", 7, windows: true).should eq("incomplete")
+    NativeACLRunner::Harness.classify("fixture", "", 0xc0000135_u32.to_i32!, windows: true).should eq("incomplete")
+    NativeACLRunner::Harness.classify("fixture", "", 0xc0000005_u32.to_i32!, windows: false).should eq("incomplete")
+  end
+
+  {% if flag?(:windows) %}
+    it "retains the real exception status of an isolated access-violation child" do
+      SpecEnvironment.with_temp_dir("acl-runner-native-crash") do |folder|
+        result = NativeACLRunner::Harness.execute([Process.executable_path.not_nil!], Path[folder] / "crash", 5.seconds,
+          env: {"ACL_RUNNER_ACCESS_VIOLATION_CHILD" => "1"})
+        result.timed_out.should be_false
+        result.exit_code.should eq(0xc0000005_u32.to_i32!)
+        NativeACLRunner::Harness.classify("fixture", File.read(result.stdout_path), result.exit_code,
+          windows: true).should eq("crash")
+      end
+    end
+  {% end %}
+
+  it "retains bounded stdout and stderr separately from a failed helper exit" do
+    SpecEnvironment.with_temp_dir("acl-runner-output") do |folder|
+      command = {% if flag?(:windows) %}
+                  ["cmd.exe", "/d", "/c", "echo observation & echo diagnostic 1>&2 & exit /b 7"]
+                {% else %}
+                  ["/bin/sh", "-c", "printf observation; printf diagnostic >&2; exit 7"]
+                {% end %}
+      result = NativeACLRunner::Harness.execute(command, Path[folder] / "failed", 5.seconds)
+      result.exit_code.should eq(7)
+      result.error.should be_nil
+      File.read(result.stdout_path).strip.should eq("observation")
+      File.read(result.stderr_path).strip.should eq("diagnostic")
+      result.timed_out.should be_false
+      result.output_limited.should be_false
+    end
+  end
+
+  it "stops an oversized helper without retaining more than its output budget" do
+    SpecEnvironment.with_temp_dir("acl-runner-limit") do |folder|
+      payload = Path[folder] / "payload"
+      File.write(payload, "x" * 4096)
+      command = {% if flag?(:windows) %}
+                  ["cmd.exe", "/d", "/c", "type", payload.to_s]
+                {% else %}
+                  ["/bin/cat", payload.to_s]
+                {% end %}
+      result = NativeACLRunner::Harness.execute(command, Path[folder] / "limited", 5.seconds, maximum_output: 128)
+      result.output_limited.should be_true
+      result.exit_code.should be_nil
+      File.size(result.stdout_path).should eq(128)
+      result.duration_ms.should be < 2000
+    end
+  end
+
+  {% unless flag?(:windows) %}
+    it "records a signalled child as a harness crash" do
+      SpecEnvironment.with_temp_dir("acl-runner-crash") do |folder|
+        result = NativeACLRunner::Harness.execute(["/bin/sh", "-c", "kill -KILL $$"], Path[folder] / "crash", 5.seconds)
+        result.signal.should_not be_nil
+        result.exit_code.should be_nil
+        NativeACLRunner::Harness.classify("fixture", File.read(result.stdout_path), result.exit_code,
+          crashed: !result.signal.nil?).should eq("crash")
+      end
+    end
+  {% end %}
+end
