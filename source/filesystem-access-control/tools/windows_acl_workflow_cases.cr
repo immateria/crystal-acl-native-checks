@@ -368,38 +368,42 @@ module WindowsACLWorkflows
                     raise "SetThreadToken failed: #{LibC.GetLastError}"
                   end
                   begin
-                    stage.call("set-thread-token-returned")
-                    stage.call("capture-subject")
+                    # Keep assertions, formatting and serialization outside the
+                    # impersonated interval. Native failures are returned as
+                    # observations; they are assessed after restoring context.
                     observed = WinACL::TokenReader.capture_subject(WinACL::TokenContext::Effective)
-                    stage.call("capture-subject-returned")
-                    ensure!(observed.complete? && observed.token.source.not_nil!.thread?, "Restricted effective-token capture incomplete")
-                    stage.call("validate-subject")
-                    if restricting
-                      ensure!(observed.restricted_sids.value.not_nil!.entries.any? { |item| item.sid == everyone },
-                        "Expected restricting SID was not observed")
-                    else
-                      ensure!(observed.groups.value.not_nil!.entries.any? { |item| item.sid == everyone && item.deny_only? && !item.enabled? },
-                        "Expected deny-only Everyone group attributes were not observed")
-                    end
-                    stage.call("subject-validated")
-                    stage.call("data-open")
                     actual = data_open(path, 1_u32)
-                    stage.call("data-open-returned")
-                    ensure!(actual[:acquired] == expected, "Restricted fresh acquisition disagrees")
-                    ensure!(actual[:open_code] == 5_u32, "Restricted acquisition failed for a reason other than access denial") unless actual[:acquired]
-                    ensure!(actual[:io_ok] == true, "Restricted acquired data I/O failed") if actual[:acquired]
-                    stage.call("serialize-row")
-                    rows << json({restricting: restricting, positive_control: index == 1,
-                                  decision: check.decision.to_s, api_success: check.api_success,
-                                  granted_mask: check.granted_mask, actual: actual,
-                                  restricted_sid_count: observed.restricted_sids.value.not_nil!.entries.size,
-                                  deny_only_count: observed.groups.value.not_nil!.entries.count(&.deny_only?)})
-                    stage.call("row-serialized")
                   ensure
-                    stage.call("revert")
                     abort "RevertToSelf failed: #{LibC.GetLastError}" if ProbeNative.revert == 0
-                    stage.call("reverted")
                   end
+                  stage.call("reverted")
+                  row = json({restricting: restricting, positive_control: index == 1,
+                              expected_acquisition: expected,
+                              decision: check.decision.to_s, api_success: check.api_success,
+                              granted_mask: check.granted_mask, actual: actual,
+                              capture_complete: observed.complete?, token_source: observed.token.source.try(&.to_s),
+                              capture_diagnostics: observed.diagnostics.map { |item|
+                                {operation: item.operation, code: item.code, origin: item.origin.to_s}
+                              },
+                              restricted_sid_count: observed.restricted_sids.value.try(&.entries.size),
+                              deny_only_count: observed.groups.value.try { |list| list.entries.count(&.deny_only?) }})
+                  # Preserve each bounded fixture result even when a later
+                  # assertion refuses completion. No raw token identity is logged.
+                  STDERR.puts("acl-restricted-token-observation #{row.to_json}")
+                  STDERR.flush
+                  rows << row
+                  ensure!(observed.complete? && observed.token.source.not_nil!.thread?, "Restricted effective-token capture incomplete")
+                  if restricting
+                    ensure!(observed.restricted_sids.value.not_nil!.entries.any? { |item| item.sid == everyone },
+                      "Expected restricting SID was not observed")
+                  else
+                    ensure!(observed.groups.value.not_nil!.entries.any? { |item| item.sid == everyone && item.deny_only? && !item.enabled? },
+                      "Expected deny-only Everyone group attributes were not observed")
+                  end
+                  ensure!(actual[:acquired] == expected, "Restricted fresh acquisition disagrees")
+                  ensure!(actual[:open_code] == 5_u32, "Restricted acquisition failed for a reason other than access denial") unless actual[:acquired]
+                  ensure!(actual[:io_ok] == true, "Restricted acquired data I/O failed") if actual[:acquired]
+                  stage.call("row-validated")
                 end
               end
               stage.call("duplicate-closed")
