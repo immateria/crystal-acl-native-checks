@@ -168,10 +168,11 @@ module WindowsACLWorkflows
       restored = false
       with_handle(parent, 0x60080_u32) do |held|
         begin
+          # Acquire every recovery handle before changing an ancestor. A parent
+          # replacement can remove inherited grants from existing descendants.
+          paths.each { |name, path| handles[name] = open_handle(path, 0x60080_u32) }
           prepare(held, recovery)
-          paths.each do |name, path|
-            handle = open_handle(path, 0x60080_u32)
-            handles[name] = handle
+          handles.each do |name, handle|
             if name.in?({"protected-dir", "protected-file"})
               prepare(handle, barrier)
             else
@@ -226,7 +227,6 @@ module WindowsACLWorkflows
       rows = [] of JSON::Any
       with_handle(parent, 0x60080_u32) do |held|
         begin
-          prepare(held, recovery)
           paths.each do |name, path|
             handle = if name == "exclusive"
                        units = path.to_s.to_utf16
@@ -243,6 +243,9 @@ module WindowsACLWorkflows
                        open_handle(path, 0x60080_u32)
                      end
             handles[name] = handle
+          end
+          prepare(held, recovery)
+          handles.each do |name, handle|
             if name == "protected"
               prepare(handle, recovery)
             else

@@ -119,7 +119,7 @@ module WindowsACLWorkflows
         Pointer(LibC::SECURITY_ATTRIBUTES).null, 3_u32, 0x02200000_u32, Pointer(Void).null)
       if handle.address == UInt64::MAX
         code = LibC.GetLastError
-        raise "CreateFileW(#{access}) failed: #{code}"
+        raise "CreateFileW(#{path}, #{access}) failed: #{code}"
       end
       handle
     end
