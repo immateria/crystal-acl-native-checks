@@ -256,6 +256,40 @@ module WindowsACLWorkflows
       acquired_data_io(handle, requested, desired, code)
     end
 
+    private def self.data_relative(parent : Void*, requested : UInt32)
+      # The directory is already held, but this NEW data handle is acquired
+      # under the current thread token. Only this known, single leaf is resolved.
+      units = "restricted".to_utf16
+      name = Slice(UInt16).new(units.size + 1, 0_u16)
+      units.copy_to(name)
+      unicode = LibC::UNICODE_STRING.new
+      unicode.length = (units.size * 2).to_u16
+      unicode.maximumLength = ((units.size + 1) * 2).to_u16
+      unicode.buffer = name.to_unsafe
+      attributes = LibC::OBJECT_ATTRIBUTES.new
+      attributes.length = sizeof(LibC::OBJECT_ATTRIBUTES).to_u32
+      attributes.rootDirectory = parent
+      attributes.objectName = pointerof(unicode)
+      attributes.attributes = 0x40_u32
+      attributes.securityDescriptor = Pointer(Void).null
+      attributes.securityQualityOfService = Pointer(Void).null
+      handle = Pointer(Void).null
+      status = LibC::IO_STATUS_BLOCK.new
+      desired = requested | 0x100000_u32
+      ntstatus = Filesystem::Capabilities::Native::Windows::Nt.NtCreateFile(pointerof(handle), desired,
+        pointerof(attributes), pointerof(status), Pointer(Int64).null, 0_u32, 7_u32, 1_u32,
+        0x00200060_u32, Pointer(Void).null, 0_u32)
+      invalid_handle = handle.null? || handle.address == UInt64::MAX
+      if ntstatus < 0 || invalid_handle
+        LibC.CloseHandle(handle) unless invalid_handle
+        return {acquired: false, ntstatus: ntstatus, desired_access: desired,
+                io_ok: nil.as(Bool?), io_error: nil.as(UInt32?)}
+      end
+      actual = acquired_data_io(handle, requested, desired, 0_u32)
+      {acquired: actual[:acquired], ntstatus: ntstatus, desired_access: desired,
+       io_ok: actual[:io_ok], io_error: actual[:io_error]}
+    end
+
     private def self.acquired_data_io(handle : Void*, requested : UInt32, desired : UInt32, code : UInt32)
       if handle.address == UInt64::MAX
         return {acquired: false, open_code: code, desired_access: desired, io_ok: nil.as(Bool?), io_error: nil.as(UInt32?)}
@@ -327,6 +361,7 @@ module WindowsACLWorkflows
     end
 
     private def self.restricted_checks(root : Path) : JSON::Any
+      root_handle = Pointer(Void).null
       # Diagnostic phases are bounded and contain only synthetic fixture IDs.
       # Keep stderr flushed so a native crash cannot erase the last boundary.
       stage = ->(phase : String) do
@@ -339,9 +374,16 @@ module WindowsACLWorkflows
       principal = user
       everyone = WinACL::SID.new("010100000000000100000000".hexbytes)
       recovery = acl([{0_u8, 0_u8, 0x1f01ff_u32, principal}])
+      root_handle = open_handle(root, 0x600a0_u32)
       rows = [] of JSON::Any
       with_handle(path, 0x60080_u32) do |held|
         prepare(held, recovery)
+        # Protect the target's explicit recovery grant before changing its
+        # parent's inheritable policy, and acquire both held handles beforehand.
+        prepare(root_handle, acl([{0_u8, 0_u8, 0x1f01ff_u32, principal},
+                                  {0_u8, 0_u8, 0x20_u32, everyone}]))
+        parent = WinACL::HandleReader.capture(root_handle)
+        ensure!(parent.complete?, "Controlled immediate-parent capture failed")
         stage.call("recovery-installed")
         with_process_token do |primary|
           [false, true].each do |restricting|
@@ -381,6 +423,9 @@ module WindowsACLWorkflows
                     permissions: WinACL::Rights.new(0x100001_u32), kind: Filesystem::AccessControl::Target::File)
                   ensure!(acquisition_check.api_success == true && acquisition_check.allowed? == expected,
                     "Restricted-token check for the exact acquisition request was incomplete or unexpected")
+                  parent_check = WinACL::Evaluator.check(parent.security, subject: subject,
+                    permissions: WinACL::Rights.new(0x20_u32), kind: Filesystem::AccessControl::Target::Directory)
+                  ensure!(parent_check.api_success == true && parent_check.allowed?, "Controlled immediate-parent traversal was not granted")
                   stage.call("set-thread-token")
                   if ProbeNative.set_thread_token(Pointer(Void*).null, subject) == 0
                     raise "SetThreadToken failed: #{LibC.GetLastError}"
@@ -392,6 +437,7 @@ module WindowsACLWorkflows
                     observed = WinACL::TokenReader.capture_subject(WinACL::TokenContext::Effective)
                     actual = data_open(path, 1_u32)
                     reopened = data_reopen(held, 1_u32)
+                    relative = data_relative(root_handle, 1_u32)
                   ensure
                     abort "RevertToSelf failed: #{LibC.GetLastError}" if ProbeNative.revert == 0
                   end
@@ -403,6 +449,12 @@ module WindowsACLWorkflows
                               acquisition_check: {requested: 0x100001_u32, decision: acquisition_check.decision.to_s,
                                                   api_success: acquisition_check.api_success, granted_mask: acquisition_check.granted_mask},
                               diagnostic_reopen: reopened, reopen_flags: 0x00200000_u32,
+                              relative_acquisition: relative, relative_options: 0x00200060_u32,
+                              root_everyone_grant: 0x20_u32, root_handle_access: 0x600a0_u32,
+                              parent_check: {requested: 0x20_u32, decision: parent_check.decision.to_s,
+                                             api_success: parent_check.api_success, granted_mask: parent_check.granted_mask},
+                              pathname_qualification: restricting && expected && !actual[:acquired] && actual[:open_code] == 5_u32 ? "outer-path-authority-not-qualified" : "expected-acquisition-required",
+                              reopen_qualification: restricting && expected && !reopened[:acquired] && reopened[:open_code] == 5_u32 ? "outer-path-authority-not-qualified" : "expected-acquisition-required",
                               capture_complete: observed.complete?, token_source: observed.token.source.try(&.to_s),
                               capture_diagnostics: observed.diagnostics.map { |item|
                                 {operation: item.operation, code: item.code, origin: item.origin.to_s}
@@ -422,10 +474,16 @@ module WindowsACLWorkflows
                     ensure!(observed.groups.value.not_nil!.entries.any? { |item| item.sid == everyone && item.deny_only? && !item.enabled? },
                       "Expected deny-only Everyone group attributes were not observed")
                   end
-                  ensure!(reopened[:acquired] == expected, "Restricted diagnostic ReOpenFile acquisition disagrees")
+                  ensure!(relative[:acquired] == expected, "Restricted root-relative acquisition disagrees")
+                  ensure!(relative[:ntstatus] == -1_073_741_790, "Restricted root-relative acquisition failed for a reason other than STATUS_ACCESS_DENIED") unless relative[:acquired]
+                  ensure!(relative[:io_ok] == true, "Restricted root-relative acquired data I/O failed") if relative[:acquired]
+                  allow_outer_denial = restricting && expected
+                  ensure!(reopened[:acquired] == expected || allow_outer_denial && reopened[:open_code] == 5_u32,
+                    "Restricted diagnostic ReOpenFile acquisition disagrees")
                   ensure!(reopened[:open_code] == 5_u32, "Restricted diagnostic ReOpenFile failed for a reason other than access denial") unless reopened[:acquired]
                   ensure!(reopened[:io_ok] == true, "Restricted diagnostic ReOpenFile data I/O failed") if reopened[:acquired]
-                  ensure!(actual[:acquired] == expected, "Restricted fresh acquisition disagrees")
+                  ensure!(actual[:acquired] == expected || allow_outer_denial && actual[:open_code] == 5_u32,
+                    "Restricted fresh acquisition disagrees")
                   ensure!(actual[:open_code] == 5_u32, "Restricted acquisition failed for a reason other than access denial") unless actual[:acquired]
                   ensure!(actual[:io_ok] == true, "Restricted acquired data I/O failed") if actual[:acquired]
                   stage.call("row-validated")
@@ -443,7 +501,14 @@ module WindowsACLWorkflows
         prepare(held, recovery)
       end
       stage.call("complete")
-      json({passed: true, rows: rows, token_construction: "CreateRestrictedToken-then-DuplicateToken", oracle: "fresh-native-open-under-explicit-thread-token"})
+      json({passed: true, rows: rows, token_construction: "CreateRestrictedToken-then-DuplicateToken",
+            oracle: "fresh-NtCreateFile-under-explicit-thread-token-with-controlled-immediate-parent",
+            acquisition_request: 0x100001_u32, immediate_parent_everyone_grant: 0x20_u32,
+            outer_path_qualification: "independent-observation; access-denied is not positive path-open qualification"})
+    ensure
+      if owned_root = root_handle
+        LibC.CloseHandle(owned_root) unless owned_root.null?
+      end
     end
   {% else %}
     def self.run(id : String) : JSON::Any
