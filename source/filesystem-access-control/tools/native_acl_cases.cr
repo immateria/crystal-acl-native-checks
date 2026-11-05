@@ -3,7 +3,7 @@ require "file_utils"
 require "random/secure"
 require "../src/filesystem-access-control"
 require "../src/filesystem-access-control/write"
-require "./windows_acl_owner_cases"
+require "./windows_acl_propagation_cases"
 
 # Product API experiments. Each command runs one case in a disposable process;
 # the calling harness owns deadlines, crashes and completion validation.
@@ -39,6 +39,7 @@ module NativeACLRunner
     CaseDefinition.new("windows.token-context", "windows", "Explicit process/effective identity and self-impersonation retain token source", "Disposable Windows process; self-impersonation allowed"),
     CaseDefinition.new("windows.writer-files", "windows", "Held-file DACL replacement records verification and handle identity", "Owned Windows local ACL-capable file fixture"),
     CaseDefinition.new("windows.writer-propagation", "windows", "Explicit directory propagation policy records existing and future children", "Owned Windows local ACL-capable directory fixture"),
+    CaseDefinition.new("windows.writer-partial", "windows", "Sharing-conflict propagation records mixed descendants; failed setter retains independent samples", "Owned Windows local NTFS fixtures; exclusive child handle"),
     CaseDefinition.new("windows.access-check", "windows", "Native access checks retain request and selected token context", "Disposable Windows process with queryable process token"),
     CaseDefinition.new("windows.restricted-token", "windows", "Restricted token observations and checks retain the selected context", "Disposable Windows process; restricted-token creation and impersonation allowed"),
     CaseDefinition.new("windows.owner-rights", "windows", "Explicit OWNER_RIGHTS entries control implicit owner security rights", "Disposable Windows process; owned NTFS file and privilege-free self-impersonation"),
@@ -164,7 +165,11 @@ module NativeACLRunner
       errors << "Public pre-capture refusal changed security" unless authority["before_unchanged"].as_bool
       errors << "Write-only handle unexpectedly supplied complete readback" if authority["limited_readback_complete"].as_bool
       errors.concat(writer_route_violations(authority["routes"]))
-    when "windows.writer-propagation", "windows.access-check", "windows.restricted-token"
+    when "windows.writer-propagation"
+      errors.concat(WindowsACLWorkflows.propagation_violations(facts))
+    when "windows.writer-partial"
+      errors.concat(WindowsACLWorkflows.partial_propagation_violations(facts))
+    when "windows.access-check", "windows.restricted-token"
       errors << "Native workflow reported violations" unless facts["passed"].as_bool
     else
       errors << "No comparison contract for #{id}"
@@ -456,7 +461,7 @@ module NativeACLRunner
 
     private def self.run_windows(id : String, root : Path) : JSON::Any
       case id
-      when "windows.writer-files", "windows.writer-propagation", "windows.access-check", "windows.restricted-token", "windows.owner-rights"
+      when "windows.writer-files", "windows.writer-propagation", "windows.writer-partial", "windows.access-check", "windows.restricted-token", "windows.owner-rights"
         WindowsACLWorkflows.run(id)
       when "windows.capture-rights"
         path = root / "file"

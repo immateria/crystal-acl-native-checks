@@ -16,7 +16,7 @@ or cache. Official compiler ZIPs and the artifact-upload action are pinned.
 The official Windows compiler assets are labelled unsupported by Crystal.
 
 Every job stages its sources and builds under `RUNNER_TEMP`. It runs the
-selected specs, descriptor/token probes, and seven native behavior cases in
+selected specs, descriptor/token probes, and eight native behavior cases in
 fresh bounded helpers. Structured receipts are printed to job logs with the
 `ACL_RECEIPT` prefix. Each job also uploads a compressed evidence bundle with
 one-day retention and a 16 MiB limit before compression. A timeout, crash,
@@ -38,9 +38,9 @@ library never changes caller credentials; disposable probes do so explicitly.
 Results qualify those fixtures and the recorded host/toolchain, not all ACL
 semantics, token contexts, filesystems or remote servers.
 
-This snapshot starts from local shard baselines `654201e`
-(filesystem-access-control) and the recorded source manifest, including
-uncommitted API and verification improvements. Hosted evidence belongs to the
+This snapshot builds on shard checkpoint `bbc583d`
+(filesystem-access-control), with additional propagation qualification cases
+identified by the source manifest. Hosted evidence belongs to the
 exact snapshot commit that ran. Sources are maintained in their own projects;
 fixes discovered here are applied there before refreshing the snapshot.
 
@@ -50,6 +50,9 @@ passed [all four native Windows cells](https://github.com/immateria/crystal-acl-
 qualification covers controlled parent-relative acquisition and data I/O;
 the restricting-positive absolute and reopen routes remain unqualified.
 
-The workflow now preserves checkout line endings and verifies every published
-source-manifest hash before testing. The shard code is unchanged; the additional
-run checks the exact published file bytes.
+The workflow preserves checkout line endings and verifies every published
+source-manifest hash before testing. The added propagation fixtures cover
+protected barriers, grandchildren, and mixed outcomes when an exclusive child
+handle prevents propagation. A separate failed parent setter retains independent
+parent and child readbacks. Simulated failure after partial effects remains
+provider/state-machine evidence, not a native failure reproduction.

@@ -13,6 +13,12 @@ module WindowsACLWorkflows
     # behavior. A refusal before capture must not be mistaken for native denial.
     private class TrackedWriterProvider < WinACL::NativeWriterProvider
       getter setter_calls : Int32 = 0
+      getter capture_calls : Int32 = 0
+
+      def capture(handle : Void*) : WinACL::HandleSnapshot
+        @capture_calls += 1
+        super
+      end
 
       def replace(handle : Void*, acl : WinACL::ACL, information : UInt32) : UInt32
         @setter_calls += 1
@@ -61,7 +67,8 @@ module WindowsACLWorkflows
       begin
         case id
         when "windows.writer-files"       then writer_files(root)
-        when "windows.writer-propagation" then propagation(root)
+        when "windows.writer-propagation" then propagation_tree(root)
+        when "windows.writer-partial"     then partial_propagation(root)
         when "windows.access-check"       then access_check(root)
         when "windows.restricted-token"   then restricted_checks(root)
         when "windows.owner-rights"       then owner_rights(root)
@@ -321,57 +328,6 @@ module WindowsACLWorkflows
       returned = ProbeNative.kernel_security(handle, information, pointer)
       code = returned == 0 ? LibC.GetLastError : 0_u32
       {returned, code, returned == 0 ? "LastError" : nil}
-    end
-
-    private def self.propagation(root : Path) : JSON::Any
-      parent = root / "parent"
-      Dir.mkdir(parent)
-      child, protected_child = parent / "child", parent / "protected"
-      File.write(child, "x")
-      File.write(protected_child, "x")
-      principal = user
-      everyone = WinACL::SID.new("010100000000000100000000".hexbytes)
-      recovery = acl([{0_u8, 0_u8, 0x1f01ff_u32, principal}])
-      desired = acl([{0_u8, 3_u8, 0x1f01ff_u32, principal}, {0_u8, 3_u8, 1_u32, everyone}])
-      with_handle(parent, 0x60080_u32) do |held|
-        # Establish explicit recovery grants before replacing the parent's
-        # inherited grants. The unprotected control must stay readable even
-        # when that replacement removes all its inherited entries.
-        with_handle(child, 0x60080_u32) do |handle|
-          code = WinACL::NativeWriterProvider.new.replace(handle, recovery, 0x20000004_u32)
-          ensure!(code == 0, "Unprotected child fixture SetSecurityInfo failed: #{code}")
-        end
-        with_handle(protected_child, 0x60080_u32) { |handle| prepare(handle, recovery) }
-        prepare(held, recovery)
-        refused = replace(held, desired)
-        ensure!(refused.execution.not_attempted?, "TargetOnly directory mutation reached setter")
-        result = replace(held, desired, WinACL::PropagationPolicy::NativePropagation)
-        ensure!(result.verified? && result.descendants.unverified?, "Native propagation did not retain target/descendant scope")
-        future = parent / "future-child"
-        File.write(future, "future")
-        child_has_candidate = false
-        protected_has_candidate = false
-        future_has_candidate = false
-        [{child, false}, {protected_child, true}].each do |path, protected_case|
-          with_handle(path, 0x20080_u32) do |handle|
-            snapshot = WinACL::HandleReader.capture(handle)
-            ensure!(snapshot.complete?, "Child readback failed")
-            present = snapshot.security.dacl.not_nil!.entries.any? { |entry| entry.trustee == everyone && entry.inheritance.inherited? }
-            protected_case ? (protected_has_candidate = present) : (child_has_candidate = present)
-          end
-        end
-        with_handle(future, 0x20080_u32) do |handle|
-          snapshot = WinACL::HandleReader.capture(handle)
-          ensure!(snapshot.complete?, "Future child readback failed")
-          future_has_candidate = snapshot.security.dacl.not_nil!.entries.any? { |entry| entry.trustee == everyone && entry.inheritance.inherited? }
-        end
-        ensure!(child_has_candidate && !protected_has_candidate && future_has_candidate, "Existing/protected/future child inheritance differed from fixture contract")
-        json({passed: true, mutation: mutation(result), unprotected_inherited: child_has_candidate,
-              protected_inherited: protected_has_candidate, future_inherited: future_has_candidate,
-              descendant_check: "three-explicit-fixtures-only"})
-      ensure
-        prepare(held, recovery)
-      end
     end
 
     private def self.with_process_token(&)

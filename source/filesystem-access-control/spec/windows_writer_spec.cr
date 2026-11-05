@@ -215,6 +215,35 @@ describe WriteWindows::Writer do
     end
   end
 
+  it "retains failed directory mutation with mixed observable effects and unverified descendants" do
+    # Provider/state-machine coverage: these ordinary files witness simulated
+    # side effects. This does not reproduce a native ACL propagation failure.
+    SpecEnvironment.with_temp_dir("acl-windows-provider-partial-tree") do |root|
+      paths = ["target", "updated-child", "denied-child"].map { |name| File.join(root, name) }
+      paths.each { |path| File.write(path, "before") }
+      directory = WindowsWriteFixtures.target(attributes: 0x10_u32)
+      provider = WindowsWriteProvider.new([directory])
+      provider.code = 5_u32
+      provider.effect = -> do
+        paths[0, 2].each { |path| File.write(path, File.read(path) + ":effect") }
+        nil
+      end
+      result = WriteWindows::Writer.replace_dacl_handle(handle, target: directory,
+        dacl: WindowsWriteFixtures.acl, inheritance: inheritance,
+        propagation: WriteWindows::PropagationPolicy::NativePropagation, provider: provider)
+      result.state.rejected?.should be_true
+      result.execution.failed?.should be_true
+      result.verification.not_run?.should be_true
+      result.stage.mutation?.should be_true
+      result.descendants.unverified?.should be_true
+      result.after.should be_nil
+      result.diagnostic.not_nil!.code.should eq(5_u32)
+      paths.map { |path| File.read(path) }.should eq(["before:effect", "before:effect", "before"])
+      provider.writes.size.should eq(1)
+      provider.captures.should eq(1)
+    end
+  end
+
   it "distinguishes valid mismatch, missing readback and post-write substitution" do
     initial = WindowsWriteFixtures.target
     afters = [initial, WriteWindows::HandleSnapshot.new(WriteWindows::Snapshot.new),

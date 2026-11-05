@@ -224,7 +224,7 @@ try {
     $env:CRYSTAL_PATH = (Join-Path $capabilities 'src') + [IO.Path]::PathSeparator + [IO.File]::ReadAllText($stdlib.StdoutPath).Trim()
     Save-AclJson (Join-Path $base 'source-before.json') (Get-AclHashes $source)
 
-    $specs = @('access_control', 'portable_access_control', 'windows_rights', 'windows_ace_views', 'windows_observation', 'windows_descriptor', 'windows_token', 'windows_token_subject', 'windows_handle', 'windows_evaluation', 'windows_writer', 'windows_capture', 'native_acl_runner', 'windows_owner_rights') | ForEach-Object { "spec/$($_)_spec.cr" }
+    $specs = @('access_control', 'portable_access_control', 'windows_rights', 'windows_ace_views', 'windows_observation', 'windows_descriptor', 'windows_token', 'windows_token_subject', 'windows_handle', 'windows_evaluation', 'windows_writer', 'windows_capture', 'native_acl_runner', 'windows_owner_rights', 'windows_propagation') | ForEach-Object { "spec/$($_)_spec.cr" }
     $null = Invoke-AclGate 'windows-specs' $crystal (@('spec', '--error-trace') + $specs) $acl 300
     $null = Invoke-AclGate 'observation-native' $crystal @('run', 'tools/portable_acl_native.cr', '--error-trace') $acl 240 'acl-observation-native-ok'
     $null = Invoke-AclGate 'token-native' $crystal @('run', 'tools/windows_token_native.cr', '--error-trace') $acl 240 'acl-windows-token-native-ok'
