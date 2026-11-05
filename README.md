@@ -44,9 +44,9 @@ identified by the source manifest. Hosted evidence belongs to the
 exact snapshot commit that ran. Sources are maintained in their own projects;
 fixes discovered here are applied there before refreshing the snapshot.
 
-On 2026-11-05 (UTC), [snapshot a65279b](https://github.com/immateria/crystal-acl-native-checks/commit/a65279b75119d62680cba74b1bec10b2658d42a8)
-passed [all four native Windows cells](https://github.com/immateria/crystal-acl-native-checks/actions/runs/41965719924):
-106 specs, two probes and six behavior cases per cell. Restricted-token
+On 2026-11-05 (UTC), [snapshot c750df7](https://github.com/immateria/crystal-acl-native-checks/commit/c750df786a30ad3f8dfd4b717474e88bbdeeef79)
+passed [all four native Windows cells](https://github.com/immateria/crystal-acl-native-checks/actions/runs/41983937317):
+132 specs, two probes and eight behavior cases per cell. Restricted-token
 qualification covers controlled parent-relative acquisition and data I/O;
 the restricting-positive absolute and reopen routes remain unqualified.
 
@@ -56,3 +56,8 @@ protected barriers, grandchildren, and mixed outcomes when an exclusive director
 handle prevents enumeration. A separate failed parent setter retains independent
 parent and child readbacks. Simulated failure after partial effects remains
 provider/state-machine evidence, not a native failure reproduction.
+All four profiles observed the blocked directory updated and its grandchild
+skipped. Descendants remain unverified in the public result. Downloaded export
+hashes, source hashes and all 32 completed observations were checked locally.
+The tested snapshot has a 119-entry manifest; later README-only revisions do
+not extend that native qualification to a new source revision.
