@@ -3,9 +3,7 @@ require "file_utils"
 require "random/secure"
 require "../src/filesystem-access-control"
 require "../src/filesystem-access-control/write"
-{% if flag?(:windows) %}
-  require "./windows_acl_workflow_cases"
-{% end %}
+require "./windows_acl_owner_cases"
 
 # Product API experiments. Each command runs one case in a disposable process;
 # the calling harness owns deadlines, crashes and completion validation.
@@ -43,6 +41,7 @@ module NativeACLRunner
     CaseDefinition.new("windows.writer-propagation", "windows", "Explicit directory propagation policy records existing and future children", "Owned Windows local ACL-capable directory fixture"),
     CaseDefinition.new("windows.access-check", "windows", "Native access checks retain request and selected token context", "Disposable Windows process with queryable process token"),
     CaseDefinition.new("windows.restricted-token", "windows", "Restricted token observations and checks retain the selected context", "Disposable Windows process; restricted-token creation and impersonation allowed"),
+    CaseDefinition.new("windows.owner-rights", "windows", "Explicit OWNER_RIGHTS entries control implicit owner security rights", "Disposable Windows process; owned NTFS file and privilege-free self-impersonation"),
   ]
 
   def self.platform : String
@@ -146,7 +145,29 @@ module NativeACLRunner
       errors << "Reversion did not restore process fallback" unless facts["restored"] == facts["ordinary"]
       errors << "Process subject capture is incomplete" unless facts["process_subject"]["complete"].as_bool
       errors << "Effective subject capture is incomplete" unless facts["effective_subject"]["complete"].as_bool
-    when "windows.writer-files", "windows.writer-propagation", "windows.access-check", "windows.restricted-token"
+    when "windows.owner-rights"
+      errors.concat(WindowsACLWorkflows.owner_rights_violations(facts))
+    when "windows.writer-files"
+      errors << "Native workflow reported violations" unless facts["passed"].as_bool
+      authority = facts["authority"]
+      errors << "Wrong write-only handle profile" unless authority["requested_access"].as_i64 == 0x40080
+      result = authority["public_result"]
+      errors << "Unreadable handle reached mutation" unless result["execution"].as_s == "NotAttempted" &&
+                                                           result["verification"].as_s == "NotRun" &&
+                                                           result["stage"].as_s == "PreCapture" &&
+                                                           authority["public_setter_calls"].as_i64 == 0
+      [result["diagnostic"], authority["limited_readback_diagnostic"]].each do |diagnostic|
+        errors << "Missing READ_CONTROL failure provenance" unless diagnostic["operation"].as_s == "GetSecurityInfo" &&
+                                                                  diagnostic["code"].as_i64 == 5 &&
+                                                                  diagnostic["origin"].as_s == "ReturnValue"
+      end
+      errors << "Setter-only control did not execute once successfully" unless authority["raw_setter_code"].as_i64 == 0 &&
+                                                                              authority["raw_setter_calls"].as_i64 == 1
+      %w(before_unchanged raw_dacl_changed raw_readback_matches identity_retained).each do |field|
+        errors << "Missing authority evidence: #{field}" unless authority[field].as_bool
+      end
+      errors << "Write-only handle unexpectedly supplied complete readback" if authority["limited_readback_complete"].as_bool
+    when "windows.writer-propagation", "windows.access-check", "windows.restricted-token"
       errors << "Native workflow reported violations" unless facts["passed"].as_bool
     else
       errors << "No comparison contract for #{id}"
@@ -394,7 +415,7 @@ module NativeACLRunner
 
     private def self.run_windows(id : String, root : Path) : JSON::Any
       case id
-      when "windows.writer-files", "windows.writer-propagation", "windows.access-check", "windows.restricted-token"
+      when "windows.writer-files", "windows.writer-propagation", "windows.access-check", "windows.restricted-token", "windows.owner-rights"
         WindowsACLWorkflows.run(id)
       when "windows.capture-rights"
         path = root / "file"

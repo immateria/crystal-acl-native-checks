@@ -9,6 +9,17 @@ module WindowsACLWorkflows
   {% if flag?(:windows) %}
     alias WinACL = Filesystem::AccessControl::Windows
 
+    # Count calls to the real native setter without changing capture or write
+    # behavior. A refusal before capture must not be mistaken for native denial.
+    private class TrackedWriterProvider < WinACL::NativeWriterProvider
+      getter setter_calls : Int32 = 0
+
+      def replace(handle : Void*, acl : WinACL::ACL, information : UInt32) : UInt32
+        @setter_calls += 1
+        super
+      end
+    end
+
     @[Link("advapi32")]
     lib ProbeNative
       struct SIDAndAttributes
@@ -35,6 +46,7 @@ module WindowsACLWorkflows
         when "windows.writer-propagation" then propagation(root)
         when "windows.access-check"       then access_check(root)
         when "windows.restricted-token"   then restricted_checks(root)
+        when "windows.owner-rights"       then owner_rights(root)
         else                                   raise ArgumentError.new("Unknown Windows workflow #{id}")
         end
       ensure
@@ -124,6 +136,7 @@ module WindowsACLWorkflows
       principal = user
       recovery = acl([{0_u8, 0_u8, 0x1f01ff_u32, principal}])
       observations = [] of JSON::Any
+      authority = nil.as(JSON::Any?)
       with_handle(path, 0x60080_u32) do |held|
         prepare(held, recovery)
         original = WinACL::HandleReader.capture(held)
@@ -136,6 +149,7 @@ module WindowsACLWorkflows
           ensure!(rejected.execution.failed? && rejected.verification.not_run?, "READ_CONTROL-only mutation did not retain setter failure")
           observations << json({case: "read-control-only", result: mutation(rejected)})
         end
+        authority = writer_authority(path, held, recovery, principal)
         File.rename(path, root / "held-name")
         File.write(path, "replacement")
         target = WinACL::HandleReader.capture(held)
@@ -155,7 +169,62 @@ module WindowsACLWorkflows
       ensure
         prepare(held, recovery)
       end
-      json({passed: true, observations: observations, scope: "held-regular-file-DACL", fixture_access: 0x60080_u32})
+      json({passed: true, observations: observations, authority: authority.not_nil!,
+            scope: "held-regular-file-DACL", fixture_access: 0x60080_u32})
+    end
+
+    private def self.same_security?(before : WinACL::HandleSnapshot, after : WinACL::HandleSnapshot) : Bool
+      before.complete? && after.complete? && before.identity == after.identity && before.kind == after.kind &&
+        before.security.owner == after.security.owner && before.security.group == after.security.group &&
+        before.security.control == after.security.control && before.security.dacl_presence == after.security.dacl_presence &&
+        before.security.dacl.try(&.bytes) == after.security.dacl.try(&.bytes)
+    end
+
+    private def self.writer_authority(path : Path, held : Void*, recovery : WinACL::ACL,
+                                     principal : WinACL::SID) : JSON::Any
+      target = WinACL::HandleReader.capture(held)
+      ensure!(target.complete?, "Authority control target capture failed")
+      desired = acl([{0_u8, 0_u8, 0x120089_u32, principal}])
+      with_handle(path, 0x40080_u32) do |write_only|
+        provider = TrackedWriterProvider.new
+        refused = WinACL::Writer.replace_dacl_handle(write_only, target: target, dacl: desired,
+          inheritance: WinACL::InheritancePolicy::PreserveObserved,
+          propagation: WinACL::PropagationPolicy::TargetOnly, provider: provider)
+        public_setter_calls = provider.setter_calls
+        ensure!(refused.execution.not_attempted? && refused.verification.not_run? &&
+                refused.stage.pre_capture? && provider.setter_calls == 0,
+          "Write-only public workflow did not refuse before its setter")
+        diagnostic = refused.diagnostic
+        ensure!(diagnostic.try(&.operation) == "GetSecurityInfo" && diagnostic.try(&.code) == 5 &&
+                diagnostic.try(&.origin.return_value?) == true, "Missing write-only pre-capture diagnostic")
+        unchanged = same_security?(target, WinACL::HandleReader.capture(held))
+        ensure!(unchanged, "Pre-capture refusal changed target security")
+
+        # The same handle has native mutation authority. Use an independent,
+        # already-held readable handle to witness a real change and its identity.
+        code = provider.replace(write_only, desired, 0x80000004_u32)
+        ensure!(code == 0 && provider.setter_calls == 1, "WRITE_DAC native control failed: #{code}")
+        after = WinACL::HandleReader.capture(held)
+        ensure!(after.complete?, "Independent authority readback failed")
+        changed = after.security.dacl.try(&.bytes) != target.security.dacl.try(&.bytes)
+        matches = after.security.dacl.try(&.bytes) == desired.bytes
+        identity_retained = after.identity == target.identity
+        ensure!(changed && matches && identity_retained, "Native authority control did not change the held target as requested")
+        limited = WinACL::HandleReader.capture(write_only)
+        limited_diagnostic = limited.security.diagnostic || limited.diagnostic
+        ensure!(!limited.complete? && limited_diagnostic.try(&.operation) == "GetSecurityInfo" &&
+                limited_diagnostic.try(&.code) == 5 && limited_diagnostic.try(&.origin.return_value?) == true,
+          "Write-only readback did not retain READ_CONTROL failure")
+        json({requested_access: 0x40080_u32, public_result: mutation(refused), public_setter_calls: public_setter_calls,
+              before_unchanged: unchanged, raw_setter_code: code, raw_setter_calls: provider.setter_calls,
+              raw_dacl_changed: changed, raw_readback_matches: matches, identity_retained: identity_retained,
+              limited_readback_complete: limited.complete?,
+              limited_readback_diagnostic: {operation: limited_diagnostic.not_nil!.operation,
+                                           code: limited_diagnostic.not_nil!.code,
+                                           origin: limited_diagnostic.not_nil!.origin.to_s}})
+      ensure
+        prepare(held, recovery)
+      end
     end
 
     private def self.propagation(root : Path) : JSON::Any

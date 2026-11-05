@@ -10,6 +10,61 @@
 
 require "./spec_helper"
 require "../tools/native_acl_runner_support"
+require "../tools/native_acl_cases"
+
+private def writer_authority_facts
+  JSON.parse({passed: true, authority: {
+    requested_access: 0x40080_u32,
+    public_result: {execution: "NotAttempted", verification: "NotRun", stage: "PreCapture",
+                    diagnostic: {operation: "GetSecurityInfo", code: 5, origin: "ReturnValue"}},
+    public_setter_calls: 0, before_unchanged: true,
+    raw_setter_code: 0, raw_setter_calls: 1, raw_dacl_changed: true,
+    raw_readback_matches: true, identity_retained: true,
+    limited_readback_complete: false,
+    limited_readback_diagnostic: {operation: "GetSecurityInfo", code: 5, origin: "ReturnValue"},
+  }}.to_json)
+end
+
+describe "Native ACL writer authority evidence" do
+  it "requires the complementary write-only authority control" do
+    NativeACLRunner.violations("windows.writer-files", JSON.parse(%({"passed":true}))).should_not be_empty
+    NativeACLRunner.violations("windows.writer-files", writer_authority_facts).should be_empty
+  end
+
+  it "rejects mutation attempts before the unreadable pre-capture boundary" do
+    facts = writer_authority_facts
+    facts["authority"].as_h["public_setter_calls"] = JSON::Any.new(1_i64)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    facts = writer_authority_facts
+    facts["authority"]["public_result"].as_h["stage"] = JSON::Any.new("Precondition")
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+  end
+
+  it "requires an actual successful native edit and independent matching readback" do
+    ["raw_setter_code", "raw_setter_calls"].each do |field|
+      facts = writer_authority_facts
+      facts["authority"].as_h[field] = JSON::Any.new(2_i64)
+      NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    end
+    ["before_unchanged", "raw_dacl_changed", "raw_readback_matches", "identity_retained"].each do |field|
+      facts = writer_authority_facts
+      facts["authority"].as_h[field] = JSON::Any.new(false)
+      NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    end
+  end
+
+  it "keeps unsupported verification and native error provenance explicit" do
+    facts = writer_authority_facts
+    facts["authority"].as_h["limited_readback_complete"] = JSON::Any.new(true)
+    NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    ["public_result", "limited_readback_diagnostic"].each do |field|
+      facts = writer_authority_facts
+      diagnostic = field == "public_result" ? facts["authority"][field]["diagnostic"] : facts["authority"][field]
+      diagnostic.as_h["origin"] = JSON::Any.new("LastError")
+      NativeACLRunner.violations("windows.writer-files", facts).should_not be_empty
+    end
+  end
+end
 
 describe "Native ACL runner completion evidence" do
   it "requires one matching complete observation and an agreeing exit status" do

@@ -17,6 +17,9 @@ $assets = @{
 $base = Join-Path $env:RUNNER_TEMP ('a' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $null = New-Item -ItemType Directory -Path $base
 Write-Host "ACL_OUTPUT_ROOT $base"
+if ($env:GITHUB_OUTPUT) {
+    [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "output-root=$base`n", [Text.UTF8Encoding]::new($false))
+}
 $gates = [Collections.Generic.List[object]]::new()
 $failures = [Collections.Generic.List[string]]::new()
 $script:receiptBytes = 0
@@ -221,7 +224,7 @@ try {
     $env:CRYSTAL_PATH = (Join-Path $capabilities 'src') + [IO.Path]::PathSeparator + [IO.File]::ReadAllText($stdlib.StdoutPath).Trim()
     Save-AclJson (Join-Path $base 'source-before.json') (Get-AclHashes $source)
 
-    $specs = @('access_control', 'portable_access_control', 'windows_rights', 'windows_ace_views', 'windows_observation', 'windows_descriptor', 'windows_token', 'windows_token_subject', 'windows_handle', 'windows_evaluation', 'windows_writer', 'windows_capture', 'native_acl_runner') | ForEach-Object { "spec/$($_)_spec.cr" }
+    $specs = @('access_control', 'portable_access_control', 'windows_rights', 'windows_ace_views', 'windows_observation', 'windows_descriptor', 'windows_token', 'windows_token_subject', 'windows_handle', 'windows_evaluation', 'windows_writer', 'windows_capture', 'native_acl_runner', 'windows_owner_rights') | ForEach-Object { "spec/$($_)_spec.cr" }
     $null = Invoke-AclGate 'windows-specs' $crystal (@('spec', '--error-trace') + $specs) $acl 300
     $null = Invoke-AclGate 'observation-native' $crystal @('run', 'tools/portable_acl_native.cr', '--error-trace') $acl 240 'acl-observation-native-ok'
     $null = Invoke-AclGate 'token-native' $crystal @('run', 'tools/windows_token_native.cr', '--error-trace') $acl 240 'acl-windows-token-native-ok'
@@ -233,7 +236,7 @@ try {
     $failures.Add($_.Exception.Message)
     Write-Host "ACL_SETUP_ERROR $($_.Exception.Message)"
 } finally {
-    # Receipts are retained only in the job log. No artifact/cache upload exists.
+    # Keep bounded job-log evidence even when later artifact collection fails.
     Get-ChildItem -LiteralPath $base -File -Recurse | Where-Object { $_.Extension -eq '.json' -or $_.Extension -eq '.stdout' -or $_.Extension -eq '.stderr' } | Sort-Object FullName | ForEach-Object {
         $relative = [IO.Path]::GetRelativePath($base, $_.FullName).Replace('\', '/')
         if ($relative.StartsWith('s/') -or $relative.StartsWith('c/') -or $relative -match '^k\d+/') { return }
@@ -244,7 +247,7 @@ try {
             } else { Write-AclLog $_.FullName $relative }
         }
     }
-    $summary = @{ schema = 'acl-windows-ci-result'; version = 1; crystal = $CrystalVersion; passed = $failures.Count -eq 0; gates = $gates.ToArray(); failures = $failures.ToArray(); source_revision = $env:GITHUB_SHA; receipts = 'bounded job logs only; no artifacts or caches uploaded' }
+    $summary = @{ schema = 'acl-windows-ci-result'; version = 1; crystal = $CrystalVersion; passed = $failures.Count -eq 0; gates = $gates.ToArray(); failures = $failures.ToArray(); source_revision = $env:GITHUB_SHA; receipts = 'bounded job logs; separate allowlisted artifact collection records its own outcome' }
     Save-AclJson (Join-Path $base 'result.json') $summary
     Write-AclReceipt (Join-Path $base 'result.json') 'result.json'
 }

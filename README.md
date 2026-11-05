@@ -11,16 +11,25 @@ are retained separately. Tests use that vendored dependency through
 manifest. `SOURCE-MANIFEST.sha256` identifies the copied files.
 
 The dispatch-only workflow uses the standard public `windows-2022` and
-`windows-2025` runners with Crystal 1.21.0 and 1.22.2. It has no paid runner,
-cache or artifact-upload step. Official compiler ZIPs are pinned by SHA-256.
+`windows-2025` runners with Crystal 1.21.0 and 1.22.2. It uses no paid runner
+or cache. Official compiler ZIPs and the artifact-upload action are pinned.
 The official Windows compiler assets are labelled unsupported by Crystal.
 
 Every job stages its sources and builds under `RUNNER_TEMP`. It runs the
-selected specs, descriptor/token probes, and six native behavior cases in
+selected specs, descriptor/token probes, and seven native behavior cases in
 fresh bounded helpers. Structured receipts are printed to job logs with the
-`ACL_RECEIPT` prefix. A timeout, crash, malformed response or incomplete
-completion is a harness failure; it never implies that a mutation was rejected
-or that no mutation occurred.
+`ACL_RECEIPT` prefix. Each job also uploads a compressed evidence bundle with
+one-day retention and a 16 MiB limit before compression. A timeout, crash,
+malformed response or incomplete completion is a harness failure; it never
+implies that a mutation was rejected or that no mutation occurred.
+
+Evidence collection runs after successful and failed native steps. It copies
+allowlisted JSON receipts and original bounded stdout/stderr files into a
+separate directory. The export manifest records hashes, sizes, omissions and
+collection errors. A collection failure leaves the native result unchanged
+and fails the collection step. Source trees, compilers, executables, caches,
+environment files and reparse paths are excluded. Failure before checkout or
+termination of the entire job can prevent artifact collection.
 
 The probes exercise held object identity, explicit non-NULL DACL replacement,
 readback verification, directory propagation, discretionary AccessCheck,
