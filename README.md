@@ -52,7 +52,7 @@ the restricting-positive absolute and reopen routes remain unqualified.
 
 The workflow preserves checkout line endings and verifies every published
 source-manifest hash before testing. The added propagation fixtures cover
-protected barriers, grandchildren, and mixed outcomes when an exclusive child
-handle prevents propagation. A separate failed parent setter retains independent
+protected barriers, grandchildren, and mixed outcomes when an exclusive directory
+handle prevents enumeration. A separate failed parent setter retains independent
 parent and child readbacks. Simulated failure after partial effects remains
 provider/state-machine evidence, not a native failure reproduction.

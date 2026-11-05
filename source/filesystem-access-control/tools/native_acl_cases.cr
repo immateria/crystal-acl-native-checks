@@ -39,7 +39,7 @@ module NativeACLRunner
     CaseDefinition.new("windows.token-context", "windows", "Explicit process/effective identity and self-impersonation retain token source", "Disposable Windows process; self-impersonation allowed"),
     CaseDefinition.new("windows.writer-files", "windows", "Held-file DACL replacement records verification and handle identity", "Owned Windows local ACL-capable file fixture"),
     CaseDefinition.new("windows.writer-propagation", "windows", "Explicit directory propagation policy records existing and future children", "Owned Windows local ACL-capable directory fixture"),
-    CaseDefinition.new("windows.writer-partial", "windows", "Sharing-conflict propagation records mixed descendants; failed setter retains independent samples", "Owned Windows local NTFS fixtures; exclusive child handle"),
+    CaseDefinition.new("windows.writer-partial", "windows", "Sharing-conflict propagation records mixed descendants; failed setter retains independent samples", "Owned Windows local NTFS fixtures; exclusive directory enumeration handle"),
     CaseDefinition.new("windows.access-check", "windows", "Native access checks retain request and selected token context", "Disposable Windows process with queryable process token"),
     CaseDefinition.new("windows.restricted-token", "windows", "Restricted token observations and checks retain the selected context", "Disposable Windows process; restricted-token creation and impersonation allowed"),
     CaseDefinition.new("windows.owner-rights", "windows", "Explicit OWNER_RIGHTS entries control implicit owner security rights", "Disposable Windows process; owned NTFS file and privilege-free self-impersonation"),

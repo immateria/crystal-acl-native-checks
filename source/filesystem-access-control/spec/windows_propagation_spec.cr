@@ -37,8 +37,12 @@ private def partial_propagation_facts
     {name: "updated", before: nodes[7]["before"], after: nodes[7]["after"], after_failed: nodes[7]["after"]},
     {name: "exclusive", before: nodes[1]["before"], after: nodes[1]["before"], after_failed: nodes[1]["before"]},
     {name: "protected", before: nodes[6]["before"], after: nodes[6]["before"], after_failed: nodes[6]["before"]},
+    {name: "blocked-dir", before: nodes[0]["before"], after: nodes[0]["after"], after_failed: nodes[0]["after"]},
+    {name: "blocked-grandchild", before: nodes[3]["before"], after: nodes[3]["before"], after_failed: nodes[3]["before"]},
   ]
-  JSON.parse({passed: true, scope: "share-conflict-mixed-propagation-not-acl-denial",
+  rows[1] = rows[1].merge({after: nodes[1]["after"], after_failed: nodes[1]["after"]})
+  JSON.parse({passed: true, scope: "share-conflict-subtree-observation-not-acl-denial",
+              directory_list_open: {requested_access: 1, opened: false, code: 32}, blocked_directory_outcome: "updated",
               recovery_restored: true, exclusive_share: 0, setter_calls: 1,
               mutation: facts["mutation"], nodes: rows,
               failed_setter_calls: 1, failed_capture_calls: 1, failed_public_after_nil: true,
@@ -62,6 +66,18 @@ describe "Windows propagation qualification evidence" do
     facts = partial_propagation_facts
     facts["failed_mutation"].as_h["execution"] = JSON::Any.new("NotAttempted")
     NativeACLRunner.violations("windows.writer-partial", facts).should_not be_empty
+  end
+
+  it "requires native sharing-denial evidence and accepts a wholly skipped blocked directory" do
+    facts = partial_propagation_facts
+    facts["directory_list_open"].as_h["code"] = JSON::Any.new(5_i64)
+    NativeACLRunner.violations("windows.writer-partial", facts).should_not be_empty
+    facts = partial_propagation_facts
+    facts.as_h["blocked_directory_outcome"] = JSON::Any.new("skipped")
+    row = facts["nodes"][3]
+    row.as_h["after"] = row["before"]
+    row.as_h["after_failed"] = row["before"]
+    NativeACLRunner.violations("windows.writer-partial", facts).should be_empty
   end
 
   it "requires observations rather than trusting the workflow completion flag" do

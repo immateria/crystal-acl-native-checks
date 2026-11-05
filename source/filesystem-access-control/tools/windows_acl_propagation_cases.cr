@@ -97,22 +97,41 @@ module WindowsACLWorkflows
   def self.partial_propagation_violations(facts : JSON::Any) : Array(String)
     errors = [] of String
     unless facts["passed"].as_bool && facts["recovery_restored"].as_bool &&
-           facts["scope"].as_s == "share-conflict-mixed-propagation-not-acl-denial" && facts["exclusive_share"].as_i64 == 0
+           facts["scope"].as_s == "share-conflict-subtree-observation-not-acl-denial" && facts["exclusive_share"].as_i64 == 0
       errors << "Unqualified sharing-conflict experiment"
     end
     errors.concat(propagation_result_violations(facts["mutation"], success: true))
     errors << "Parent setter was replayed" unless facts["setter_calls"].as_i64 == 1
+    oracle = facts["directory_list_open"]
+    unless oracle["requested_access"].as_i64 == 1 && !oracle["opened"].as_bool && oracle["code"].as_i64 == 32
+      errors << "Exclusive directory did not deny fresh enumeration acquisition"
+    end
     rows = facts["nodes"].as_a
-    errors << "Missing mixed-result witnesses" unless rows.size == 3
+    errors << "Missing mixed-result witnesses" unless rows.size == 5
     seen = Set(String).new
     rows.each do |row|
       name = row["name"].as_s
-      errors << "Duplicate or unexpected mixed witness" unless seen.add?(name) && name.in?({"updated", "exclusive", "protected"})
+      errors << "Duplicate or unexpected mixed witness" unless seen.add?(name) && name.in?({"updated", "exclusive", "protected", "blocked-dir", "blocked-grandchild"})
       errors.concat(held_witness_violations(row["before"], row["after"]))
       prior, later = propagation_descriptor(row["before"]), propagation_descriptor(row["after"])
       errors.concat(candidate_violations(prior, nil, "before/#{name}"))
-      errors.concat(candidate_violations(later, name == "updated" ? 16 : nil, name))
-      errors << "Skipped fixture changed" if name != "updated" && prior.bytes != later.bytes
+      expected_flags = if name == "blocked-dir"
+                         # The blocked directory's own metadata can be updated
+                         # independently of acquiring it for enumeration. Record
+                         # both named outcomes; the grandchild must stay skipped.
+                         case facts["blocked_directory_outcome"].as_s
+                         when "updated" then 19
+                         when "skipped" then nil
+                         else
+                           errors << "Unknown blocked-directory outcome"
+                           nil
+                         end
+                       elsif name.in?({"updated", "exclusive"})
+                         16
+                       end
+      errors.concat(candidate_violations(later, expected_flags, name))
+      errors << "Wrong mixed fixture kind" unless row["after"]["directory"].as_bool == (name == "blocked-dir")
+      errors << "Skipped fixture changed" if name.in?({"protected", "blocked-grandchild"}) && prior.bytes != later.bytes
       errors.concat(held_witness_violations(row["after"], row["after_failed"]))
       errors << "Failed parent setter changed sampled child" unless later.bytes == propagation_descriptor(row["after_failed"]).bytes
     end
@@ -221,21 +240,23 @@ module WindowsACLWorkflows
       everyone = WinACL::SID.new("010100000000000100000000".hexbytes)
       recovery = acl([{0_u8, 0_u8, 0x1f01ff_u32, principal}])
       desired = acl([{0_u8, 3_u8, 0x1f01ff_u32, principal}, {0_u8, 3_u8, 1_u32, everyone}])
-      paths = {"updated" => parent / "updated", "exclusive" => parent / "exclusive", "protected" => parent / "protected"}
-      paths.each_value { |path| File.write(path, "fixture") }
+      paths = {"updated" => parent / "updated", "exclusive" => parent / "exclusive", "protected" => parent / "protected",
+               "blocked-dir" => parent / "blocked", "blocked-grandchild" => parent / "blocked" / "child"}
+      paths.each { |name, path| name == "blocked-dir" ? Dir.mkdir(path) : File.write(path, "fixture") }
       handles = {} of String => Void*
       rows = [] of JSON::Any
       with_handle(parent, 0x60080_u32) do |held|
         begin
           paths.each do |name, path|
-            handle = if name == "exclusive"
+            handle = if name.in?({"exclusive", "blocked-dir"})
                        units = path.to_s.to_utf16
                        native_name = Slice(UInt16).new(units.size + 1, 0_u16)
                        units.copy_to(native_name)
-                       # Share mode zero deliberately prevents the propagation
-                       # walker from acquiring this child. This is a sharing
-                       # conflict, not a claim about child ACL-edit authority.
-                       value = LibC.CreateFileW(native_name.to_unsafe, 0x60080_u32, 0_u32,
+                       # The directory also holds LIST_DIRECTORY. The file
+                       # control holds security rights only: share mode zero
+                       # did not block its ACL update in run 41983308412.
+                       access = name == "blocked-dir" ? 0x60081_u32 : 0x60080_u32
+                       value = LibC.CreateFileW(native_name.to_unsafe, access, 0_u32,
                          Pointer(LibC::SECURITY_ATTRIBUTES).null, 3_u32, 0x02200000_u32, Pointer(Void).null)
                        raise "Exclusive fixture open failed: #{LibC.GetLastError}" if value.address == UInt64::MAX
                        value
@@ -254,12 +275,16 @@ module WindowsACLWorkflows
             end
           end
           before = handles.transform_values { |handle| propagation_capture(handle) }
+          directory_list_open = propagation_list_open(paths["blocked-dir"])
           target = WinACL::HandleReader.capture(held)
           provider = TrackedWriterProvider.new
           result = WinACL::Writer.replace_dacl_handle(held, target: target, dacl: desired,
             inheritance: WinACL::InheritancePolicy::PreserveObserved,
             propagation: WinACL::PropagationPolicy::NativePropagation, provider: provider)
           handles.each { |name, handle| rows << json({name: name, before: before[name], after: propagation_capture(handle)}) }
+          blocked = WinACL::HandleReader.capture(handles["blocked-dir"])
+          ensure!(blocked.complete?, "Blocked directory independent readback failed")
+          blocked_directory_outcome = blocked.security.dacl.not_nil!.entries.any? { |entry| entry.trustee == everyone } ? "updated" : "skipped"
           parent_before_failed = propagation_capture(held)
           # Complete capture is possible through this newly acquired handle;
           # the setter must execute and fail because WRITE_DAC was not granted.
@@ -281,11 +306,26 @@ module WindowsACLWorkflows
             handles.each_value { |handle| LibC.CloseHandle(handle) }
           end
         end
-        json({passed: true, scope: "share-conflict-mixed-propagation-not-acl-denial", recovery_restored: true,
+        json({passed: true, scope: "share-conflict-subtree-observation-not-acl-denial", recovery_restored: true,
+              directory_list_open: directory_list_open, blocked_directory_outcome: blocked_directory_outcome,
               exclusive_share: 0, setter_calls: provider.not_nil!.setter_calls, mutation: mutation(result.not_nil!), nodes: rows,
               failed_mutation: mutation(failed.not_nil!), failed_setter_calls: failed_provider.not_nil!.setter_calls,
               failed_capture_calls: failed_provider.not_nil!.capture_calls, failed_public_after_nil: failed.not_nil!.after.nil?,
               parent_before_failed: parent_before_failed, parent_after_failed: parent_after_failed})
+      end
+    end
+
+    private def self.propagation_list_open(path : Path)
+      units = path.to_s.to_utf16
+      name = Slice(UInt16).new(units.size + 1, 0_u16)
+      units.copy_to(name)
+      handle = LibC.CreateFileW(name.to_unsafe, 1_u32, 7_u32,
+        Pointer(LibC::SECURITY_ATTRIBUTES).null, 3_u32, 0x02200000_u32, Pointer(Void).null)
+      if handle.address == UInt64::MAX
+        {requested_access: 1_u32, opened: false, code: LibC.GetLastError}
+      else
+        LibC.CloseHandle(handle)
+        {requested_access: 1_u32, opened: true, code: 0_u32}
       end
     end
   {% end %}
