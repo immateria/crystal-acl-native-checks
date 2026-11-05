@@ -34,3 +34,13 @@ This snapshot starts from local shard baselines `654201e`
 uncommitted API and verification improvements. Hosted evidence belongs to the
 exact snapshot commit that ran. Sources are maintained in their own projects;
 fixes discovered here are applied there before refreshing the snapshot.
+
+On 2026-11-05 (UTC), [snapshot a65279b](https://github.com/immateria/crystal-acl-native-checks/commit/a65279b75119d62680cba74b1bec10b2658d42a8)
+passed [all four native Windows cells](https://github.com/immateria/crystal-acl-native-checks/actions/runs/41965719924):
+106 specs, two probes and six behavior cases per cell. Restricted-token
+qualification covers controlled parent-relative acquisition and data I/O;
+the restricting-positive absolute and reopen routes remain unqualified.
+
+The workflow now preserves checkout line endings and verifies every published
+source-manifest hash before testing. The shard code is unchanged; the additional
+run checks the exact published file bytes.

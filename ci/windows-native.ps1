@@ -104,6 +104,34 @@ function Get-AclVolumeProfile([string]$VolumeRoot) {
     }
     return $volumeProfile
 }
+function Test-AclSourceManifest([string]$Root) {
+    $manifest = Join-Path $Root 'SOURCE-MANIFEST.sha256'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw 'Missing SOURCE-MANIFEST.sha256' }
+    $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $count = 0
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -notmatch '\A([0-9a-fA-F]{64})  (.+)\z') { throw "Malformed manifest row $($count + 1)" }
+        $expected = $Matches[1].ToLowerInvariant()
+        $relative = $Matches[2]
+        if ([IO.Path]::IsPathRooted($relative) -or $relative.Contains('\') -or $relative.Contains(':') -or $relative -match '(^|/)\.{1,2}(/|$)') {
+            throw "Malformed manifest path: $relative"
+        }
+        foreach ($segment in $relative.Split('/')) {
+            if (-not $segment -or $segment.EndsWith('.') -or $segment.EndsWith(' ')) {
+                throw "Malformed manifest path: $relative"
+            }
+        }
+        if (-not $paths.Add($relative)) { throw "Duplicate manifest path: $relative" }
+        $file = Join-Path $Root $relative
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing manifest file: $relative" }
+        $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -cne $expected) { throw "Hash mismatch: $relative (expected $expected, observed $actual)" }
+        $count++
+    }
+    if ($count -eq 0) { throw 'Source manifest has no files' }
+    return @{ schema = 'acl-source-manifest'; version = 1; state = 'Verified'; files = $count;
+        manifest_sha256 = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant() }
+}
 
 try {
     $os = Get-CimInstance Win32_OperatingSystem
@@ -119,6 +147,9 @@ try {
     }
     Save-AclJson (Join-Path $base 'host.json') $hostEvidence
     Write-AclReceipt (Join-Path $base 'host.json') 'host.json'
+    $manifestEvidence = Test-AclSourceManifest $PackageRoot
+    Save-AclJson (Join-Path $base 'source-manifest.json') $manifestEvidence
+    Write-AclReceipt (Join-Path $base 'source-manifest.json') 'source-manifest.json'
     if ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'Expected a native x64 process' }
 
     # Required by Crystal's portable Windows package; this VM is disposable.

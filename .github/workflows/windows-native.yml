@@ -31,6 +31,8 @@ jobs:
           if ($env:GITHUB_SHA -notmatch '\A[0-9a-f]{40}\z') { throw 'Expected an immutable source commit' }
           git init $env:GITHUB_WORKSPACE
           if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          git -C $env:GITHUB_WORKSPACE config core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'git newline configuration failed' }
           git -C $env:GITHUB_WORKSPACE remote add origin "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
           if ($LASTEXITCODE -ne 0) { throw 'git remote failed' }
           git -C $env:GITHUB_WORKSPACE fetch --no-tags --depth=1 origin $env:GITHUB_SHA
