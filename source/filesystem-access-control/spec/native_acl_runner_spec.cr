@@ -52,6 +52,18 @@ describe "Native ACL runner completion evidence" do
     NativeACLRunner::Harness.classify("fixture", "", 0xc0000005_u32.to_i32!, windows: false).should eq("incomplete")
   end
 
+  it "preserves Windows status bits which optional normal-exit helpers discard" do
+    [0_u32, 1_u32, 7_u32, 0x3fffffff_u32, 0x40000000_u32,
+     0x80000000_u32, 0xc0000005_u32, 0xffffffff_u32].each do |raw|
+      status = Process::Status.new(system_exit_status: {% if flag?(:windows) %}raw{% else %}raw.to_i32!{% end %})
+      NativeACLRunner::Harness.reported_exit_code(status, windows: true).should eq(raw.to_i32!)
+    end
+    NativeACLRunner::Harness.reported_exit_code(Process::Status[7], windows: false).should eq(7)
+    {% unless flag?(:windows) %}
+      NativeACLRunner::Harness.reported_exit_code(Process::Status[Signal::KILL], windows: false).should be_nil
+    {% end %}
+  end
+
   {% if flag?(:windows) %}
     it "retains an explicit native exception-status termination from a disposable child" do
       SpecEnvironment.with_temp_dir("acl-runner-native-crash") do |folder|
@@ -61,6 +73,7 @@ describe "Native ACL runner completion evidence" do
         stderr = File.exists?(result.stderr_path) ? File.read(result.stderr_path)[0, 2048] : "<not captured>"
         result.exit_code.should eq(0xc0000005_u32.to_i32!),
           "Native status fixture returned #{result.exit_code}; harness error=#{result.error}; stderr=#{stderr}"
+        result.system_exit_status.should eq(0xc0000005_u32)
         NativeACLRunner::Harness.classify("fixture", File.read(result.stdout_path), result.exit_code,
           windows: true).should eq("crash")
       end

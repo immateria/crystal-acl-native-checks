@@ -169,8 +169,15 @@ module WindowsACLWorkflows
       recovery = acl([{0_u8, 0_u8, 0x1f01ff_u32, principal}])
       desired = acl([{0_u8, 3_u8, 0x1f01ff_u32, principal}, {0_u8, 3_u8, 1_u32, everyone}])
       with_handle(parent, 0x60080_u32) do |held|
-        prepare(held, recovery)
+        # Establish explicit recovery grants before replacing the parent's
+        # inherited grants. The unprotected control must stay readable even
+        # when that replacement removes all its inherited entries.
+        with_handle(child, 0x60080_u32) do |handle|
+          code = WinACL::NativeWriterProvider.new.replace(handle, recovery, 0x20000004_u32)
+          ensure!(code == 0, "Unprotected child fixture SetSecurityInfo failed: #{code}")
+        end
         with_handle(protected_child, 0x60080_u32) { |handle| prepare(handle, recovery) }
+        prepare(held, recovery)
         refused = replace(held, desired)
         ensure!(refused.execution.not_attempted?, "TargetOnly directory mutation reached setter")
         result = replace(held, desired, WinACL::PropagationPolicy::NativePropagation)
@@ -306,6 +313,13 @@ module WindowsACLWorkflows
     end
 
     private def self.restricted_checks(root : Path) : JSON::Any
+      # Diagnostic phases are bounded and contain only synthetic fixture IDs.
+      # Keep stderr flushed so a native crash cannot erase the last boundary.
+      stage = ->(phase : String) do
+        STDERR.puts("acl-restricted-token phase=#{phase}")
+        STDERR.flush
+      end
+      stage.call("setup")
       path = root / "restricted"
       File.write(path, "fixture")
       principal = user
@@ -314,8 +328,10 @@ module WindowsACLWorkflows
       rows = [] of JSON::Any
       with_handle(path, 0x60080_u32) do |held|
         prepare(held, recovery)
+        stage.call("recovery-installed")
         with_process_token do |primary|
           [false, true].each do |restricting|
+            stage.call("create restricting=#{restricting}")
             sid = everyone.bytes
             entry = ProbeNative::SIDAndAttributes.new
             entry.sid, entry.attributes = sid.to_unsafe.as(Void*), 0_u32
@@ -326,26 +342,38 @@ module WindowsACLWorkflows
                  0_u32, Pointer(Void).null, restricting ? 1_u32 : 0_u32, restrictions, pointerof(restricted)) == 0
               raise "CreateRestrictedToken failed: #{LibC.GetLastError}"
             end
+            stage.call("created")
             begin
+              stage.call("duplicate")
               with_impersonation(restricted) do |subject|
+                stage.call("duplicated")
                 # Original user grants cannot satisfy a separate restricting
                 # SID pass. A deny-only SID cannot satisfy an allow ACE.
                 values = restricting ? [acl([{0_u8, 0_u8, 0x100001_u32, principal}]),
                                         acl([{0_u8, 0_u8, 0x100001_u32, principal}, {0_u8, 0_u8, 0x100001_u32, everyone}])] : [acl([{0_u8, 0_u8, 0x100001_u32, everyone}]),
                                                                                                                                acl([{0_u8, 0_u8, 0x100001_u32, principal}])]
                 values.each_with_index do |value, index|
+                  stage.call("replace restricting=#{restricting} fixture=#{index}")
                   result = replace(held, value)
+                  stage.call("replace-returned")
                   ensure!(result.verified?, "Restricted fixture DACL replacement failed")
+                  stage.call("access-check")
                   check = WinACL::Evaluator.check(result.after.not_nil!.security, subject: subject,
                     permissions: WinACL::Rights::ReadData, kind: Filesystem::AccessControl::Target::File)
+                  stage.call("access-check-returned")
                   expected = index == 1
                   ensure!(check.api_success == true && check.allowed? == expected, "Restricted-token check was incomplete or unexpected")
+                  stage.call("set-thread-token")
                   if ProbeNative.set_thread_token(Pointer(Void*).null, subject) == 0
                     raise "SetThreadToken failed: #{LibC.GetLastError}"
                   end
                   begin
+                    stage.call("set-thread-token-returned")
+                    stage.call("capture-subject")
                     observed = WinACL::TokenReader.capture_subject(WinACL::TokenContext::Effective)
+                    stage.call("capture-subject-returned")
                     ensure!(observed.complete? && observed.token.source.not_nil!.thread?, "Restricted effective-token capture incomplete")
+                    stage.call("validate-subject")
                     if restricting
                       ensure!(observed.restricted_sids.value.not_nil!.entries.any? { |item| item.sid == everyone },
                         "Expected restricting SID was not observed")
@@ -353,28 +381,39 @@ module WindowsACLWorkflows
                       ensure!(observed.groups.value.not_nil!.entries.any? { |item| item.sid == everyone && item.deny_only? && !item.enabled? },
                         "Expected deny-only Everyone group attributes were not observed")
                     end
+                    stage.call("subject-validated")
+                    stage.call("data-open")
                     actual = data_open(path, 1_u32)
+                    stage.call("data-open-returned")
                     ensure!(actual[:acquired] == expected, "Restricted fresh acquisition disagrees")
                     ensure!(actual[:open_code] == 5_u32, "Restricted acquisition failed for a reason other than access denial") unless actual[:acquired]
                     ensure!(actual[:io_ok] == true, "Restricted acquired data I/O failed") if actual[:acquired]
+                    stage.call("serialize-row")
                     rows << json({restricting: restricting, positive_control: index == 1,
                                   decision: check.decision.to_s, api_success: check.api_success,
                                   granted_mask: check.granted_mask, actual: actual,
                                   restricted_sid_count: observed.restricted_sids.value.not_nil!.entries.size,
                                   deny_only_count: observed.groups.value.not_nil!.entries.count(&.deny_only?)})
+                    stage.call("row-serialized")
                   ensure
+                    stage.call("revert")
                     abort "RevertToSelf failed: #{LibC.GetLastError}" if ProbeNative.revert == 0
+                    stage.call("reverted")
                   end
                 end
               end
+              stage.call("duplicate-closed")
             ensure
+              stage.call("close-restricted")
               LibC.CloseHandle(restricted)
             end
           end
         end
       ensure
+        stage.call("restore-recovery")
         prepare(held, recovery)
       end
+      stage.call("complete")
       json({passed: true, rows: rows, token_construction: "CreateRestrictedToken-then-DuplicateToken", oracle: "fresh-native-open-under-explicit-thread-token"})
     end
   {% else %}

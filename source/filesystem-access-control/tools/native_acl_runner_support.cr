@@ -17,11 +17,19 @@ module NativeACLRunner
 
     record Execution, command : Array(String), exit_code : Int32?, signal : String?,
       timed_out : Bool, output_limited : Bool, duration_ms : Int64,
-      stdout_path : String, stderr_path : String, error : String? do
+      stdout_path : String, stderr_path : String, error : String?,
+      system_exit_status : UInt32? = nil do
       include JSON::Serializable
     end
 
     private record Event, kind : Symbol, status : Process::Status? = nil, error : String? = nil
+
+    # Windows reports a DWORD for both ordinary exits and exception statuses.
+    # Crystal's #exit_code? intentionally omits abnormal statuses; retain those
+    # bits here. POSIX wait status still needs its normal exit-code extraction.
+    def self.reported_exit_code(status : Process::Status, *, windows : Bool) : Int32?
+      windows ? status.system_exit_status.to_i32! : status.exit_code?
+    end
 
     def self.execute(command : Array(String), prefix : Path, deadline : Time::Span,
                      env : Process::Env = nil, chdir : String? = nil,
@@ -94,10 +102,10 @@ module NativeACLRunner
             end
           end
         end
-        normal_code = !timed_out && !limited ? status.try(&.exit_code?) : nil
-        Execution.new(command, normal_code, status.try(&.exit_signal?.try(&.to_s)),
+        reported_code = !timed_out && !limited ? status.try { |value| reported_exit_code(value, windows: {{ flag?(:windows) }}) } : nil
+        Execution.new(command, reported_code, status.try(&.exit_signal?.try(&.to_s)),
           timed_out, limited, (Time.monotonic - started).total_milliseconds.to_i64,
-          output_path, error_path, failure)
+          output_path, error_path, failure, status.try(&.system_exit_status))
       rescue error
         Execution.new(command, nil, nil, false, false,
           (Time.monotonic - started).total_milliseconds.to_i64, output_path, error_path, error.message)
