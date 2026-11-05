@@ -94,14 +94,27 @@ try {
     if ($vs.ExitCode -ne 0 -or $vs.Error -or $vs.TimedOut -or $vs.OutputLimited) { throw 'vswhere did not locate the C++ toolchain' }
     $install = [IO.File]::ReadAllText($vs.StdoutPath).Trim()
     $devCmd = Join-Path $install 'Common7\Tools\VsDevCmd.bat'
-    $command = 'call "' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 >nul && set'
-    $dev = Invoke-AclProcess -FilePath $env:ComSpec -ArgumentList @('/d', '/c', $command) -WorkingDirectory $base -Prefix (Join-Path $base 'vs-environment') -TimeoutSeconds 30
+    # CMD does not parse embedded quotes using the Windows CRT rules applied by
+    # ProcessStartInfo.ArgumentList. Keep command syntax inside a batch file;
+    # pass only its simple filename at the process boundary.
+    $environmentFile = Join-Path $base 'vs-vars.txt'
+    @(
+        '@echo off'
+        ('call "' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64')
+        'if errorlevel 1 exit /b %errorlevel%'
+        ('set > "' + $environmentFile + '"')
+    ) | Set-Content -LiteralPath (Join-Path $base 'vs-environment.cmd') -Encoding ascii
+    $dev = Invoke-AclProcess -FilePath $env:ComSpec -ArgumentList @('/d', '/c', 'vs-environment.cmd') -WorkingDirectory $base -Prefix (Join-Path $base 'vs-environment') -TimeoutSeconds 30
+    Save-AclJson (Join-Path $base 'vs-environment.json') $dev
+    Write-AclReceipt (Join-Path $base 'vs-environment.json') 'vs-environment.json'
+    Write-AclLog $dev.StdoutPath 'vs-environment.stdout'
+    Write-AclLog $dev.StderrPath 'vs-environment.stderr'
     if ($dev.ExitCode -ne 0 -or $dev.Error -or $dev.TimedOut -or $dev.OutputLimited) { throw 'VsDevCmd failed' }
     # Import but never print the full environment: hosted runners contain tokens.
-    [IO.File]::ReadAllLines($dev.StdoutPath) | ForEach-Object {
+    [IO.File]::ReadAllLines($environmentFile) | ForEach-Object {
         if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
     }
-    [IO.File]::Delete($dev.StdoutPath)
+    [IO.File]::Delete($environmentFile)
     Save-AclJson (Join-Path $base 'toolchain.json') @{
         vs_installation = $install; vc_tools = $env:VCToolsVersion; windows_sdk = $env:WindowsSDKVersion
         linker = (Get-Command link.exe -ErrorAction Stop).Source; compiler = (Get-Command cl.exe -ErrorAction Stop).Source
